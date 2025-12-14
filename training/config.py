@@ -36,17 +36,12 @@ class TrainingConfig:
 
     # ===== 经验回放 =====
     REPLAY_BUFFER_SIZE = 50000  # 回放缓冲区大小
-    REPLAY_SAMPLE_SIZE = 5000   # 每次训练抽样大小
     PRIORITIZED_ALPHA = 0.6     # 优先级回放alpha
     PRIORITIZED_BETA = 0.4      # 优先级回放beta（重要性采样）
     PRIORITIZED_BETA_INCREMENT = 0.001  # beta增长率
 
     # ===== 价值标签 =====
     VALUE_GAMMA = 0.99       # 价值折扣因子
-
-    # ===== 样本加权 =====
-    WINNER_WEIGHT = 1.0      # 赢家步骤权重
-    LOSER_WEIGHT = 0.3       # 输家步骤权重（修复：从0.0改为0.3）
 
     # ===== 评估设置 =====
     EVAL_FREQUENCY = 10      # 每N次迭代评估一次
@@ -55,7 +50,6 @@ class TrainingConfig:
 
     # ===== 并行设置 =====
     NUM_WORKERS = 8          # 自我对弈并行进程数
-    MCTS_BATCH_SIZE = 32     # MCTS批量评估大小
 
     # ===== 检查点设置 =====
     CHECKPOINT_FREQUENCY = 50  # 每N次迭代保存检查点

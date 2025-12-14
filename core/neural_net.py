@@ -257,38 +257,9 @@ def create_enhanced_model(
     return model
 
 
-def prepare_input(board, turn):
-    """
-    准备模型输入（与旧版本兼容）
-
-    Args:
-        board: (board_size, board_size) NumPy数组，0=空位，1=黑棋，2=白棋
-        turn: 当前玩家（1或2）
-
-    Returns:
-        (1, board_size, board_size, 3) 张量
-    """
-    board_size = board.shape[0]
-
-    # 通道1: 当前玩家棋子
-    player_channel = (board == turn).astype(float)
-
-    # 通道2: 对手棋子
-    opponent_turn = 2 if turn == 1 else 1
-    opponent_channel = (board == opponent_turn).astype(float)
-
-    # 通道3: 当前回合标识
-    turn_channel = np.ones((board_size, board_size), dtype=float) if turn == 1 else np.zeros((board_size, board_size), dtype=float)
-
-    # 堆叠为3通道
-    input_tensor = np.stack([player_channel, opponent_channel, turn_channel], axis=-1)
-
-    # 添加批次维度
-    return np.expand_dims(input_tensor, axis=0)
-
-
 if __name__ == '__main__':
     import numpy as np
+    from core.game_state import GameState
 
     print("=== 测试增强的SE-ResNet模型 ===\n")
 
@@ -313,11 +284,11 @@ if __name__ == '__main__':
 
     # 测试前向传播
     print("\n测试前向传播...")
-    test_board = np.zeros((15, 15), dtype=int)
-    test_board[7, 7] = 1  # 中间放一个黑棋
-    test_board[8, 8] = 2  # 附近放一个白棋
+    state = GameState(board_size=15)
+    state.make_move(7, 7)  # 中间放一个黑棋
+    state.make_move(8, 8)  # 附近放一个白棋
 
-    test_input = prepare_input(test_board, turn=1)
+    test_input = np.expand_dims(state.to_input(), axis=0)  # 添加批次维度
     print(f"  输入形状: {test_input.shape}")
 
     policy, value = test_model.predict(test_input, verbose=0)

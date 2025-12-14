@@ -38,14 +38,8 @@ class GameState:
         Returns:
             新的GameState实例
         """
-        # 深拷贝game对象
-        new_game = GomokuGame(board_size=self.board_size)
-        new_game.board = self.game.board.copy()
-        new_game.turn = self.game.turn
-        new_game.game_over = self.game.game_over
-        new_game.winner = self.game.winner
-        new_game.last_move = self.game.last_move
-
+        # 使用深拷贝确保完整复制（避免遗漏新增属性）
+        new_game = copy.deepcopy(self.game)
         return GameState(board_size=self.board_size, game=new_game)
 
     def get_legal_moves(self):

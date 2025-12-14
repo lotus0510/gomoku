@@ -19,7 +19,6 @@ class MCTSNode:
         self.total_value = 0.0      # W(s,a) - 累计价值
         self.prior_prob = prior_prob # P(s,a) - 先验概率
         self.children = {}          # 子节点字典 {action: MCTSNode}
-        self.virtual_loss = 0       # 虚拟损失（并行搜索用）
 
     def get_value(self):
         """获取节点平均价值 Q(s,a) = W(s,a) / N(s,a)"""

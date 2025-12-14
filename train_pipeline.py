@@ -17,16 +17,20 @@ import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
-        # 使用第一个 GPU (NVIDIA RTX 3070 Ti)
-        tf.config.set_visible_devices(gpus[0], 'GPU')
-        # 允许 GPU 内存按需增长，避免占用全部显存
-        tf.config.experimental.set_memory_growth(gpus[0], True)
-        print(f"✅ 使用 GPU: {gpus[0].name}")
-    except RuntimeError as e:
-        print(f"⚠️  GPU 配置错误: {e}")
+        # 支持多GPU或通过环境变量指定
+        gpu_id = int(os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0])
+        selected_gpu = gpus[gpu_id] if gpu_id < len(gpus) else gpus[0]
+
+        # 允许 GPU 内存按需增长
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+
+        print(f"✅ 检测到 {len(gpus)} 个GPU，使用: {selected_gpu.name}")
+    except (RuntimeError, ValueError, IndexError) as e:
+        print(f"⚠️  GPU 配置错误: {e}，使用CPU")
 
 from game import GomokuGame
-from core.neural_net import create_enhanced_model, prepare_input
+from core.neural_net import create_enhanced_model
 from core.mcts import MCTS
 from core.game_state import GameState
 from core.data_augmentation import get_symmetries
@@ -36,103 +40,128 @@ from evaluation.elo_rating import EloRating
 from evaluation.arena import Arena
 
 
-def run_self_play_game_worker(args):
+# 全局变量用于缓存模型（每个worker进程一份）
+_worker_model = None
+_worker_config = None
+
+
+def init_worker(model_weights_path, config_dict):
     """
-    自我对弈worker（多进程）
+    初始化worker进程（进程池创建时调用一次）
 
     Args:
-        args: (game_num, model_weights_path, config_dict)
+        model_weights_path: 模型权重路径
+        config_dict: 配置字典
+    """
+    global _worker_model, _worker_config
+
+    # 重建配置
+    _worker_config = TrainingConfig()
+    for key, value in config_dict.items():
+        setattr(_worker_config, key, value)
+
+    # 创建并加载模型（每个进程只做一次）
+    _worker_model = create_enhanced_model(
+        board_size=_worker_config.BOARD_SIZE,
+        num_res_blocks=_worker_config.NUM_RES_BLOCKS,
+        num_filters=_worker_config.NUM_FILTERS,
+        se_ratio=_worker_config.SE_RATIO,
+        l2_reg=_worker_config.L2_REG
+    )
+
+    if os.path.exists(model_weights_path):
+        _worker_model.load_weights(model_weights_path)
+
+    print(f"  [进程 {os.getpid()}] 模型已初始化")
+
+
+def run_self_play_game_worker(game_num):
+    """
+    自我对弈worker（多进程，使用缓存的模型）
+
+    Args:
+        game_num: 游戏编号
 
     Returns:
         list of (state, policy, value) tuples
     """
-    game_num, model_weights_path, config_dict = args
+    global _worker_model, _worker_config
 
-    # 重建配置对象
-    config = TrainingConfig()
-    for key, value in config_dict.items():
-        setattr(config, key, value)
+    try:
+        print(f"  [进程 {os.getpid()}] 开始第 {game_num + 1} 局...")
 
-    print(f"  [进程 {os.getpid()}] 开始第 {game_num + 1} 局...")
+        # 使用缓存的模型和配置
+        model = _worker_model
+        config = _worker_config
 
-    # 创建模型
-    model = create_enhanced_model(
-        board_size=config.BOARD_SIZE,
-        num_res_blocks=config.NUM_RES_BLOCKS,
-        num_filters=config.NUM_FILTERS,
-        se_ratio=config.SE_RATIO,
-        l2_reg=config.L2_REG
-    )
+        # 创建MCTS
+        mcts = MCTS(model, config)
 
-    # 加载权重
-    if os.path.exists(model_weights_path):
-        model.load_weights(model_weights_path)
+        # 创建游戏
+        state = GameState(board_size=config.BOARD_SIZE)
+        game_history = []
 
-    # 创建MCTS
-    mcts = MCTS(model, config)
+        # 游戏循环
+        move_count = 0
+        max_moves = config.BOARD_SIZE * config.BOARD_SIZE
 
-    # 创建游戏
-    state = GameState(board_size=config.BOARD_SIZE)
-    game_history = []
+        while not state.is_game_over() and move_count < max_moves:
+            # MCTS搜索
+            action_probs, root_value = mcts.search(state, add_noise=True)
 
-    # 游戏循环
-    move_count = 0
-    max_moves = config.BOARD_SIZE * config.BOARD_SIZE
+            # 温度采样
+            if move_count < config.TEMP_THRESHOLD_MOVE:
+                temperature = 1.0
+            elif move_count < config.TEMP_FINAL_MOVE:
+                temperature = 0.5
+            else:
+                temperature = 0.01
 
-    while not state.is_game_over() and move_count < max_moves:
-        # MCTS搜索
-        action_probs, root_value = mcts.search(state, add_noise=True)
+            action = mcts.get_action_with_temperature(action_probs, temperature)
 
-        # 温度采样
-        if move_count < config.TEMP_THRESHOLD_MOVE:
-            temperature = 1.0
-        elif move_count < config.TEMP_FINAL_MOVE:
-            temperature = 0.5
-        else:
-            temperature = 0.01
+            # 记录状态
+            game_history.append({
+                'state': state.to_input(),  # (15, 15, 3)
+                'policy': action_probs,      # (225,)
+                'turn': state.get_current_player()
+            })
 
-        action = mcts.get_action_with_temperature(action_probs, temperature)
+            # 执行动作
+            state.make_move(*action)
+            move_count += 1
 
-        # 记录状态
-        game_history.append({
-            'state': state.to_input(),  # (15, 15, 3)
-            'policy': action_probs,      # (225,)
-            'turn': state.get_current_player()
-        })
+        # 游戏结束，计算价值标签
+        winner = state.get_winner()
+        training_data = []
 
-        # 执行动作
-        state.make_move(*action)
-        move_count += 1
+        for i, entry in enumerate(game_history):
+            steps_to_end = len(game_history) - i - 1
 
-    # 游戏结束，计算价值标签
-    winner = state.get_winner()
-    training_data = []
+            if winner == 0:
+                value = 0.0  # 平局
+            else:
+                base_value = 1.0 if entry['turn'] == winner else -1.0
+                # 价值折扣
+                value = base_value * (config.VALUE_GAMMA ** steps_to_end)
 
-    for i, entry in enumerate(game_history):
-        steps_to_end = len(game_history) - i - 1
+            training_data.append((
+                entry['state'],
+                entry['policy'],
+                value
+            ))
 
-        if winner == 0:
-            value = 0.0  # 平局
-        else:
-            base_value = 1.0 if entry['turn'] == winner else -1.0
-            # 价值折扣
-            value = base_value * (config.VALUE_GAMMA ** steps_to_end)
+        print(f"  [进程 {os.getpid()}] 第 {game_num + 1} 局完成，{move_count}步")
 
-        training_data.append((
-            entry['state'],
-            entry['policy'],
-            value
-        ))
+        # 清理MCTS（模型是共享的，不删除）
+        del mcts
 
-    print(f"  [进程 {os.getpid()}] 第 {game_num + 1} 局完成，{move_count}步")
+        return training_data
 
-    # 清理内存
-    del model
-    del mcts
-    import gc
-    gc.collect()
-
-    return training_data
+    except Exception as e:
+        print(f"  [进程 {os.getpid()}] 错误：第 {game_num + 1} 局失败 - {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return []  # 返回空数据，避免整个训练崩溃
 
 
 def evaluate_vs_random(model, config, num_games=20):
@@ -213,9 +242,17 @@ def train(config, resume_from=None):
         value_head_hidden=config.VALUE_HEAD_HIDDEN
     )
 
+    # 创建学习率调度器
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=config.LEARNING_RATE,
+        decay_steps=config.LR_DECAY_STEPS,
+        decay_rate=config.LR_DECAY_RATE,
+        staircase=True
+    )
+
     # 编译模型
     model.compile(
-        optimizer=Adam(learning_rate=config.LEARNING_RATE, clipnorm=config.GRADIENT_CLIP_NORM),
+        optimizer=Adam(learning_rate=lr_schedule, clipnorm=config.GRADIENT_CLIP_NORM),
         loss={
             'policy_output': 'categorical_crossentropy',
             'value_output': tf.keras.losses.Huber(delta=1.0)
@@ -267,11 +304,15 @@ def train(config, resume_from=None):
 
         # 准备参数
         config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith('_')}
-        args_list = [(i, model_weights_path, config_dict) for i in range(config.GAMES_PER_ITERATION)]
+        game_numbers = list(range(config.GAMES_PER_ITERATION))
 
-        # 多进程自我对弈
-        with multiprocessing.Pool(processes=config.NUM_WORKERS) as pool:
-            results = pool.map(run_self_play_game_worker, args_list)
+        # 多进程自我对弈（使用initializer避免重复加载模型）
+        with multiprocessing.Pool(
+            processes=config.NUM_WORKERS,
+            initializer=init_worker,
+            initargs=(model_weights_path, config_dict)
+        ) as pool:
+            results = pool.map(run_self_play_game_worker, game_numbers)
 
         # 收集数据
         all_games_data = [item for game_data in results for item in game_data]
@@ -281,10 +322,12 @@ def train(config, resume_from=None):
         print(f"\n[2/4] 数据增强（8种对称变换）...")
         augmented_data = []
         for state, policy, value in all_games_data:
-            # 随机选择一种对称变换
+            # 使用全部8种对称变换，而非随机选1种
             symmetries = get_symmetries(state, policy, config.BOARD_SIZE)
-            aug_state, aug_policy = symmetries[np.random.randint(8)]
-            augmented_data.append((aug_state, aug_policy, value))
+            for aug_state, aug_policy in symmetries:
+                augmented_data.append((aug_state, aug_policy, value))
+
+        print(f"  增强后数据: {len(all_games_data)} -> {len(augmented_data)} (8x)")
 
         # 添加到回放缓冲区
         for data in augmented_data:
@@ -300,6 +343,10 @@ def train(config, resume_from=None):
             continue
 
         epoch_losses = []
+        last_indices = None
+        last_X = None
+        last_y_value = None
+
         for epoch in range(config.EPOCHS_PER_ITERATION):
             # 从缓冲区采样
             samples, weights, indices = replay_buffer.sample(config.BATCH_SIZE)
@@ -321,6 +368,23 @@ def train(config, resume_from=None):
             )
 
             epoch_losses.append(loss_dict)
+
+            # 保存最后一个批次用于更新优先级
+            last_indices = indices
+            last_X = X
+            last_y_value = y_value
+
+        # 更新优先级：使用最后一个批次计算 TD-error
+        if last_indices is not None and len(last_indices) > 0:
+            # 获取当前预测
+            _, pred_values = model.predict(last_X, verbose=0)
+            pred_values = pred_values.flatten()
+
+            # 计算 TD-error（价值预测误差）
+            td_errors = np.abs(pred_values - last_y_value)
+
+            # 更新优先级
+            replay_buffer.update_priorities(last_indices, td_errors)
 
         # 计算平均损失
         avg_loss = {
