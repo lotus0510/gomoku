@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution
+build/
+dist/
+*.egg-info/
+
+# Environments
+.venv
+venv/
+env/
+.env
+
+# IDEs
+.idea/
+.vscode/
+
+# Project Specific
+logs/
+checkpoints/
+old_backup/
+*.h5
+*.weights.h5
+latest_model.weights.h5
+monitor.csv
+
+# System
+.DS_Store
+Thumbs.db
+nul
