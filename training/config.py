@@ -60,6 +60,7 @@ class TrainingConfig:
     TENSORBOARD_DIR = 'logs/tensorboard'
     CHECKPOINT_DIR = 'checkpoints'
     ENABLE_GAME_LOGGING = True  # 是否记录每局游戏详细数据
+    DETAILED_GAME_LOG_FREQUENCY = 10  # 每N局保存详细游戏数据（棋谱、策略）
 
     # ===== 损失权重 =====
     POLICY_LOSS_WEIGHT = 1.0

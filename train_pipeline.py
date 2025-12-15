@@ -311,7 +311,12 @@ def train(config, resume_from=None):
 
     # 创建游戏日志记录器（可以通过配置禁用）
     enable_game_logging = getattr(config, 'ENABLE_GAME_LOGGING', True)
-    game_logger = GameLogger(log_dir='logs/games', enabled=enable_game_logging)
+    detailed_frequency = getattr(config, 'DETAILED_GAME_LOG_FREQUENCY', 10)
+    game_logger = GameLogger(
+        log_dir='logs/games',
+        enabled=enable_game_logging,
+        detailed_frequency=detailed_frequency
+    )
 
     # 训练历史
     history = {

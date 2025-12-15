@@ -10,16 +10,18 @@ import numpy as np
 class GameLogger:
     """记录每局游戏的详细信息"""
 
-    def __init__(self, log_dir='logs/games', enabled=True):
+    def __init__(self, log_dir='logs/games', enabled=True, detailed_frequency=10):
         """
         初始化游戏日志记录器
 
         Args:
             log_dir: 日志目录
             enabled: 是否启用日志（可以设为False节省磁盘空间）
+            detailed_frequency: 每N局保存详细数据（设为1则每局都保存）
         """
         self.log_dir = log_dir
         self.enabled = enabled
+        self.detailed_frequency = detailed_frequency
 
         if self.enabled:
             os.makedirs(log_dir, exist_ok=True)
@@ -110,8 +112,8 @@ class GameLogger:
             # 添加到当前迭代游戏列表
             self.current_iteration_games.append(game_record)
 
-            # 可选：保存详细的游戏数据（每100局保存一次详细数据）
-            if game_num % 100 == 0:
+            # 保存详细的游戏数据（根据配置频率）
+            if self.detailed_frequency > 0 and (game_num % self.detailed_frequency == 0 or game_num == 0):
                 self._save_detailed_game(iteration, game_num, game_data, game_record)
 
         except Exception as e:
