@@ -36,6 +36,7 @@ from core.game_state import GameState
 from core.data_augmentation import get_symmetries
 from training.config import TrainingConfig
 from training.replay_buffer import PrioritizedReplayBuffer
+from training.game_logger import GameLogger
 from evaluation.elo_rating import EloRating
 from evaluation.arena import Arena
 
@@ -83,11 +84,16 @@ def run_self_play_game_worker(game_num):
         game_num: 游戏编号
 
     Returns:
-        list of (state, policy, value) tuples
+        tuple: (training_data, game_metadata)
+            - training_data: list of (state, policy, value) tuples
+            - game_metadata: dict with game statistics
     """
     global _worker_model, _worker_config
 
     try:
+        import time
+        start_time = time.time()
+
         print(f"  [进程 {os.getpid()}] 开始第 {game_num + 1} 局...")
 
         # 使用缓存的模型和配置
@@ -100,12 +106,15 @@ def run_self_play_game_worker(game_num):
         # 创建游戏
         state = GameState(board_size=config.BOARD_SIZE)
         game_history = []
+        moves_list = []  # 记录实际移动
+        mcts_times = []  # 记录每步MCTS时间
 
         # 游戏循环
         move_count = 0
         max_moves = config.BOARD_SIZE * config.BOARD_SIZE
 
         while not state.is_game_over() and move_count < max_moves:
+            mcts_start = time.time()
             # MCTS搜索
             action_probs, root_value = mcts.search(state, add_noise=True)
 
@@ -119,12 +128,18 @@ def run_self_play_game_worker(game_num):
 
             action = mcts.get_action_with_temperature(action_probs, temperature)
 
+            mcts_times.append(time.time() - mcts_start)
+
             # 记录状态
             game_history.append({
                 'state': state.to_input(),  # (15, 15, 3)
                 'policy': action_probs,      # (225,)
-                'turn': state.get_current_player()
+                'turn': state.get_current_player(),
+                'value': root_value  # 根节点价值估计
             })
+
+            # 记录实际移动
+            moves_list.append(action)
 
             # 执行动作
             state.make_move(*action)
@@ -150,18 +165,31 @@ def run_self_play_game_worker(game_num):
                 value
             ))
 
-        print(f"  [进程 {os.getpid()}] 第 {game_num + 1} 局完成，{move_count}步")
+        game_duration = time.time() - start_time
+
+        print(f"  [进程 {os.getpid()}] 第 {game_num + 1} 局完成，{move_count}步，{game_duration:.1f}秒")
+
+        # 构建游戏元数据
+        game_metadata = {
+            'num_moves': move_count,
+            'winner': winner,
+            'duration': game_duration,
+            'avg_mcts_time': np.mean(mcts_times) if mcts_times else 0,
+            'moves': moves_list,
+            'policies': [entry['policy'] for entry in game_history],
+            'values': [entry['value'] for entry in game_history]
+        }
 
         # 清理MCTS（模型是共享的，不删除）
         del mcts
 
-        return training_data
+        return training_data, game_metadata
 
     except Exception as e:
         print(f"  [进程 {os.getpid()}] 错误：第 {game_num + 1} 局失败 - {str(e)}")
         import traceback
         traceback.print_exc()
-        return []  # 返回空数据，避免整个训练崩溃
+        return [], {}  # 返回空数据，避免整个训练崩溃
 
 
 def evaluate_vs_random(model, config, num_games=20):
@@ -281,6 +309,10 @@ def train(config, resume_from=None):
         beta=config.PRIORITIZED_BETA
     )
 
+    # 创建游戏日志记录器（可以通过配置禁用）
+    enable_game_logging = getattr(config, 'ENABLE_GAME_LOGGING', True)
+    game_logger = GameLogger(log_dir='logs/games', enabled=enable_game_logging)
+
     # 训练历史
     history = {
         'iterations': [],
@@ -314,9 +346,19 @@ def train(config, resume_from=None):
         ) as pool:
             results = pool.map(run_self_play_game_worker, game_numbers)
 
-        # 收集数据
-        all_games_data = [item for game_data in results for item in game_data]
-        print(f"  收集到 {len(all_games_data)} 步训练数据")
+        # 收集训练数据和游戏元数据
+        all_games_data = []
+        all_games_metadata = []
+        for training_data, game_metadata in results:
+            all_games_data.extend(training_data)
+            if game_metadata:  # 如果不为空
+                all_games_metadata.append(game_metadata)
+
+        print(f"  收集到 {len(all_games_data)} 步训练数据，{len(all_games_metadata)} 局游戏")
+
+        # 记录每局游戏到日志
+        for game_num, metadata in enumerate(all_games_metadata):
+            game_logger.log_game(iteration + 1, game_num, metadata)
 
         # 2. 数据增强
         print(f"\n[2/4] 数据增强（8种对称变换）...")
@@ -445,6 +487,9 @@ def train(config, resume_from=None):
 
         with open(history_path, 'w') as f:
             json.dump(history_native, f, indent=2)
+
+        # 完成本次迭代的游戏日志
+        game_logger.finish_iteration(iteration + 1)
 
     print(f"\n{'=' * 60}")
     print("训练完成！")

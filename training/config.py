@@ -59,6 +59,7 @@ class TrainingConfig:
     LOG_FREQUENCY = 1        # 每N次迭代记录日志
     TENSORBOARD_DIR = 'logs/tensorboard'
     CHECKPOINT_DIR = 'checkpoints'
+    ENABLE_GAME_LOGGING = True  # 是否记录每局游戏详细数据
 
     # ===== 损失权重 =====
     POLICY_LOSS_WEIGHT = 1.0
