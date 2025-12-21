@@ -152,35 +152,119 @@ def analyze_iteration_progress(iterations):
             print("\n⚠️  游戏步数减少 = 可能过度追求速胜")
 
 
+def setup_chinese_font():
+    """设置中文字体"""
+    import matplotlib.pyplot as plt
+    import matplotlib
+
+    plt.rcParams['axes.unicode_minus'] = False
+
+    found_font = False
+    chinese_fonts = ['Microsoft JhengHei', 'Microsoft YaHei', 'SimHei', 'SimSun', 'Arial Unicode MS']
+
+    for font in chinese_fonts:
+        try:
+            if font in [f.name for f in matplotlib.font_manager.fontManager.ttflist]:
+                plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
+                print(f"✅ 使用字体: {font}")
+                found_font = True
+                break
+        except:
+            continue
+
+    if not found_font:
+        print("⚠️  未找到常见中文字体，图表文字可能显示为方框")
+
+
+def plot_training_loss(training_history, save_path='logs/games/training_loss.png'):
+    """绘制训练损失图表"""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib
+        import numpy as np
+
+        matplotlib.use('Agg')
+        setup_chinese_font()
+
+        if not training_history or 'total_loss' not in training_history:
+            print("⚠️  无损失数据")
+            return
+
+        iterations = training_history['iterations']
+        total_loss = training_history['total_loss']
+        policy_loss = training_history['policy_loss']
+        value_loss = training_history['value_loss']
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('训练损失分析', fontsize=16)
+
+        # 1. 总损失趋势
+        ax = axes[0, 0]
+        ax.plot(iterations, total_loss, marker='o', linewidth=2, color='red', label='总损失')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('损失值')
+        ax.set_title('总损失趋势')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # 2. 策略损失 vs 价值损失
+        ax = axes[0, 1]
+        ax.plot(iterations, policy_loss, marker='s', linewidth=2, color='blue', label='策略损失')
+        ax.plot(iterations, value_loss, marker='^', linewidth=2, color='green', label='价值损失')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('损失值')
+        ax.set_title('策略损失 vs 价值损失')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # 3. 损失下降率（移动平均）
+        ax = axes[1, 0]
+        if len(total_loss) > 5:
+            window = 5
+            ma_loss = np.convolve(total_loss, np.ones(window)/window, mode='valid')
+            ma_iters = iterations[window-1:]
+            ax.plot(ma_iters, ma_loss, linewidth=2, color='purple', label=f'{window}迭代移动平均')
+            ax.plot(iterations, total_loss, alpha=0.3, color='red', label='原始数据')
+        else:
+            ax.plot(iterations, total_loss, linewidth=2, color='purple')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('损失值')
+        ax.set_title('总损失平滑趋势')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # 4. 损失统计
+        ax = axes[1, 1]
+        loss_data = [total_loss, policy_loss, value_loss]
+        labels = ['总损失', '策略损失', '价值损失']
+        bp = ax.boxplot(loss_data, labels=labels, patch_artist=True)
+        for patch, color in zip(bp['boxes'], ['red', 'blue', 'green']):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+        ax.set_ylabel('损失值')
+        ax.set_title('损失分布统计')
+        ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"📊 损失图表已保存: {save_path}")
+        plt.close()
+
+    except Exception as e:
+        print(f"⚠️  绘制损失图表失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def plot_training_progress(df, iterations, training_history=None, save_path='logs/games/analysis.png'):
     """绘制训练进度图表"""
     try:
         import matplotlib.pyplot as plt
         import matplotlib
         from matplotlib.font_manager import FontProperties
-        
-        matplotlib.use('Agg')  # 无GUI后端
 
-        # 设置中文字体
-        plt.rcParams['axes.unicode_minus'] = False # 解决负号显示问题
-        
-        # 尝试常见的中文字体
-        found_font = False
-        chinese_fonts = ['Microsoft JhengHei', 'Microsoft YaHei', 'SimHei', 'SimSun', 'Arial Unicode MS']
-        
-        for font in chinese_fonts:
-            try:
-                # 检查字体是否可用
-                if font in [f.name for f in matplotlib.font_manager.fontManager.ttflist]:
-                    plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
-                    print(f"✅ 使用字体: {font}")
-                    found_font = True
-                    break
-            except:
-                continue
-                
-        if not found_font:
-            print("⚠️  未找到常见中文字体，图表文字可能显示为方框")
+        matplotlib.use('Agg')  # 无GUI后端
+        setup_chinese_font()
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle('训练游戏分析', fontsize=16)
@@ -255,6 +339,231 @@ def plot_training_progress(df, iterations, training_history=None, save_path='log
         traceback.print_exc()
 
 
+def plot_performance_analysis(df, save_path='logs/games/performance.png'):
+    """绘制性能分析图表"""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib
+        import numpy as np
+
+        matplotlib.use('Agg')
+        setup_chinese_font()
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('MCTS 性能分析', fontsize=16)
+
+        # 1. MCTS 时间趋势
+        ax = axes[0, 0]
+        by_iteration = df.groupby('iteration')['avg_mcts_time'].agg(['mean', 'std'])
+        ax.plot(by_iteration.index, by_iteration['mean'], marker='o', linewidth=2, color='orange')
+        ax.fill_between(by_iteration.index,
+                        by_iteration['mean'] - by_iteration['std'],
+                        by_iteration['mean'] + by_iteration['std'],
+                        alpha=0.3, color='orange')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('MCTS 时间 (秒/步)')
+        ax.set_title('MCTS 平均时间趋势')
+        ax.grid(True, alpha=0.3)
+
+        # 2. 游戏时长趋势
+        ax = axes[0, 1]
+        by_iteration = df.groupby('iteration')['game_duration_sec'].agg(['mean', 'std'])
+        ax.plot(by_iteration.index, by_iteration['mean'], marker='s', linewidth=2, color='brown')
+        ax.fill_between(by_iteration.index,
+                        by_iteration['mean'] - by_iteration['std'],
+                        by_iteration['mean'] + by_iteration['std'],
+                        alpha=0.3, color='brown')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('时长 (秒)')
+        ax.set_title('游戏时长趋势')
+        ax.grid(True, alpha=0.3)
+
+        # 3. MCTS 时间 vs 游戏步数
+        ax = axes[1, 0]
+        scatter = ax.scatter(df['num_moves'], df['avg_mcts_time'],
+                           alpha=0.3, c=df['iteration'], cmap='viridis', s=10)
+        ax.set_xlabel('游戏步数')
+        ax.set_ylabel('MCTS 时间 (秒/步)')
+        ax.set_title('MCTS 时间 vs 游戏步数')
+        plt.colorbar(scatter, ax=ax, label='迭代次数')
+        ax.grid(True, alpha=0.3)
+
+        # 4. 效率分析：每步耗时
+        ax = axes[1, 1]
+        df['time_per_move'] = df['game_duration_sec'] / df['num_moves']
+        by_iteration = df.groupby('iteration')['time_per_move'].mean()
+        ax.plot(by_iteration.index, by_iteration.values, marker='d', linewidth=2, color='teal')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('每步耗时 (秒)')
+        ax.set_title('每步平均耗时')
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"📊 性能图表已保存: {save_path}")
+        plt.close()
+
+    except Exception as e:
+        print(f"⚠️  绘制性能图表失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def plot_data_distribution(df, save_path='logs/games/distribution.png'):
+    """绘制数据分布图表"""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib
+        import numpy as np
+
+        matplotlib.use('Agg')
+        setup_chinese_font()
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('数据分布分析', fontsize=16)
+
+        # 1. 游戏步数分布
+        ax = axes[0, 0]
+        ax.hist(df['num_moves'], bins=30, edgecolor='black', alpha=0.7, color='skyblue')
+        ax.axvline(df['num_moves'].mean(), color='red', linestyle='--',
+                   label=f'均值: {df["num_moves"].mean():.1f}')
+        ax.axvline(df['num_moves'].median(), color='green', linestyle='--',
+                   label=f'中位数: {df["num_moves"].median():.1f}')
+        ax.set_xlabel('游戏步数')
+        ax.set_ylabel('频数')
+        ax.set_title('游戏步数分布')
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+
+        # 2. 策略熵分布
+        ax = axes[0, 1]
+        ax.hist(df['avg_policy_entropy'], bins=30, edgecolor='black', alpha=0.7, color='lightgreen')
+        ax.axvline(df['avg_policy_entropy'].mean(), color='red', linestyle='--',
+                   label=f'均值: {df["avg_policy_entropy"].mean():.3f}')
+        ax.set_xlabel('策略熵')
+        ax.set_ylabel('频数')
+        ax.set_title('策略熵分布')
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+
+        # 3. 胜负分布（饼图）
+        ax = axes[1, 0]
+        black_wins = df['black_win'].sum()
+        white_wins = df['white_win'].sum()
+        draws = df['draw'].sum()
+        sizes = [black_wins, white_wins, draws]
+        labels = [f'黑胜 ({black_wins})', f'白胜 ({white_wins})', f'平局 ({draws})']
+        colors = ['#2c3e50', '#ecf0f1', '#95a5a6']
+        ax.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+        ax.set_title('整体胜负分布')
+
+        # 4. 先手优势演化
+        ax = axes[1, 1]
+        by_iteration = df.groupby('iteration').agg({
+            'black_win': 'sum',
+            'white_win': 'sum'
+        })
+        by_iteration['black_rate'] = by_iteration['black_win'] / (by_iteration['black_win'] + by_iteration['white_win'])
+        ax.plot(by_iteration.index, by_iteration['black_rate'], marker='o', linewidth=2)
+        ax.axhline(y=0.5, color='red', linestyle='--', label='50% (均衡)')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('黑方胜率')
+        ax.set_title('先手优势演化')
+        ax.set_ylim(0, 1)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"📊 分布图表已保存: {save_path}")
+        plt.close()
+
+    except Exception as e:
+        print(f"⚠️  绘制分布图表失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def plot_correlation_analysis(df, save_path='logs/games/correlation.png'):
+    """绘制相关性分析图表"""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib
+        import numpy as np
+
+        matplotlib.use('Agg')
+        setup_chinese_font()
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('相关性分析', fontsize=16)
+
+        # 1. 策略熵 vs 游戏步数
+        ax = axes[0, 0]
+        scatter = ax.scatter(df['avg_policy_entropy'], df['num_moves'],
+                           alpha=0.3, c=df['iteration'], cmap='plasma', s=10)
+        ax.set_xlabel('策略熵')
+        ax.set_ylabel('游戏步数')
+        ax.set_title('策略熵 vs 游戏步数')
+        plt.colorbar(scatter, ax=ax, label='迭代次数')
+
+        # 计算相关系数
+        corr = np.corrcoef(df['avg_policy_entropy'], df['num_moves'])[0, 1]
+        ax.text(0.05, 0.95, f'相关系数: {corr:.3f}',
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax.grid(True, alpha=0.3)
+
+        # 2. 策略熵 vs 胜率
+        ax = axes[0, 1]
+        by_entropy_bin = pd.cut(df['avg_policy_entropy'], bins=10)
+        win_by_entropy = df.groupby(by_entropy_bin)['black_win'].mean()
+        entropy_centers = [interval.mid for interval in win_by_entropy.index]
+        ax.plot(entropy_centers, win_by_entropy.values, marker='o', linewidth=2)
+        ax.set_xlabel('策略熵')
+        ax.set_ylabel('黑方胜率')
+        ax.set_title('策略熵 vs 胜率')
+        ax.grid(True, alpha=0.3)
+
+        # 3. 收敛性分析（策略熵标准差）
+        ax = axes[1, 0]
+        by_iteration = df.groupby('iteration')['avg_policy_entropy'].std()
+        ax.plot(by_iteration.index, by_iteration.values, marker='s', linewidth=2, color='purple')
+        ax.set_xlabel('迭代次数')
+        ax.set_ylabel('策略熵标准差')
+        ax.set_title('策略一致性（标准差越低越收敛）')
+        ax.grid(True, alpha=0.3)
+
+        # 4. 相关性热图
+        ax = axes[1, 1]
+        corr_cols = ['num_moves', 'game_duration_sec', 'avg_mcts_time', 'avg_policy_entropy']
+        corr_matrix = df[corr_cols].corr()
+
+        im = ax.imshow(corr_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+        ax.set_xticks(range(len(corr_cols)))
+        ax.set_yticks(range(len(corr_cols)))
+        ax.set_xticklabels(['步数', '时长', 'MCTS', '策略熵'], rotation=45, ha='right')
+        ax.set_yticklabels(['步数', '时长', 'MCTS', '策略熵'])
+
+        # 添加数值标注
+        for i in range(len(corr_cols)):
+            for j in range(len(corr_cols)):
+                text = ax.text(j, i, f'{corr_matrix.iloc[i, j]:.2f}',
+                             ha='center', va='center', color='black', fontsize=10)
+
+        ax.set_title('特征相关性矩阵')
+        plt.colorbar(im, ax=ax)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"📊 相关性图表已保存: {save_path}")
+        plt.close()
+
+    except Exception as e:
+        print(f"⚠️  绘制相关性图表失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def show_recent_games(df, n=10):
     """显示最近N局游戏"""
     print("\n" + "=" * 60)
@@ -304,11 +613,25 @@ def main():
             print("暂无评估数据")
 
     # 绘图
+    print("\n" + "=" * 60)
+    print("📊 生成图表")
+    print("=" * 60)
+
+    plot_training_loss(history)
     plot_training_progress(df, iterations, history)
+    plot_performance_analysis(df)
+    plot_data_distribution(df)
+    plot_correlation_analysis(df)
 
     print("\n" + "=" * 60)
     print("✅ 分析完成！")
     print("=" * 60)
+    print("\n生成的图表:")
+    print("  1. logs/games/training_loss.png - 训练损失分析")
+    print("  2. logs/games/analysis.png - 训练进度分析")
+    print("  3. logs/games/performance.png - MCTS 性能分析")
+    print("  4. logs/games/distribution.png - 数据分布分析")
+    print("  5. logs/games/correlation.png - 相关性分析")
 
 
 if __name__ == '__main__':
