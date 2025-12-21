@@ -19,14 +19,11 @@ env/
 .vscode/
 
 # Project Specific
-logs/
+logs/*
 !logs/games/
+logs/games/*
 !logs/games/*.csv
-!logs/games/*.jsonl
-!logs/analysis/
-!logs/analysis/*.png
-!logs/analysis/*.txt
-logs/games/iteration_*/
+!logs/games/*.png
 checkpoints/
 old_backup/
 *.h5
