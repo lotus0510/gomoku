@@ -37,7 +37,7 @@ class TrainingConfig:
     EPOCHS_PER_ITERATION = 5 # 每次迭代训练epoch数
 
     # ===== 经验回放 =====
-    REPLAY_BUFFER_SIZE = 50000  # 回放缓冲区大小
+    REPLAY_BUFFER_SIZE = 400000  # 回放缓冲区大小 (约保存10次迭代的数据)
     PRIORITIZED_ALPHA = 0.6     # 优先级回放alpha
     PRIORITIZED_BETA = 0.4      # 优先级回放beta（重要性采样）
     PRIORITIZED_BETA_INCREMENT = 0.001  # beta增长率
