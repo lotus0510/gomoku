@@ -14,6 +14,7 @@ def confirm_reset():
     print()
     print("即将删除以下内容：")
     print("  ✗ checkpoints/ - 所有模型和训练历史")
+    print("  ✗ logs/ - 游戏日志和 TensorBoard 日志")
     print("  ✗ __pycache__/ - Python 缓存")
     print("  ✗ training_visualization.png - 可视化图片")
     print()
@@ -26,7 +27,7 @@ def reset_training():
     """执行重置"""
     # 删除检查点目录
     if os.path.exists('checkpoints'):
-        print("[1/3] 删除 checkpoints/...")
+        print("[1/4] 删除 checkpoints/...")
         try:
             shutil.rmtree('checkpoints')
             os.makedirs('checkpoints', exist_ok=True)
@@ -34,10 +35,22 @@ def reset_training():
         except Exception as e:
             print(f"      ✗ 错误: {e}")
     else:
-        print("[1/3] checkpoints/ 不存在，跳过")
+        print("[1/4] checkpoints/ 不存在，跳过")
+
+    # 删除日志目录
+    if os.path.exists('logs'):
+        print("[2/4] 删除 logs/...")
+        try:
+            shutil.rmtree('logs')
+            os.makedirs('logs', exist_ok=True)
+            print("      ✓ 完成")
+        except Exception as e:
+            print(f"      ✗ 错误: {e}")
+    else:
+        print("[2/4] logs/ 不存在，跳过")
 
     # 删除 Python 缓存
-    print("[2/3] 删除 Python 缓存...")
+    print("[3/4] 删除 Python 缓存...")
     cache_count = 0
 
     # 删除当前目录的 __pycache__
@@ -61,7 +74,7 @@ def reset_training():
     print(f"      ✓ 删除了 {cache_count} 个缓存目录")
 
     # 删除可视化图片
-    print("[3/3] 删除可视化图片...")
+    print("[4/4] 删除可视化图片...")
     viz_file = 'training_visualization.png'
     if os.path.exists(viz_file):
         try:
@@ -78,7 +91,7 @@ def reset_training():
     print("=" * 60)
     print()
     print("现在可以重新开始训练：")
-    print("  python train_pipeline.py --fast-test")
+    print("  python train_pipeline_pytorch.py --fast-test")
     print()
 
 

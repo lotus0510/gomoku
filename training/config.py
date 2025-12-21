@@ -16,9 +16,11 @@ class TrainingConfig:
 
     # ===== MCTS 设置 =====
     MCTS_SIMULATIONS = 200   # 每步MCTS模拟次数
+    MCTS_BATCH_SIZE = 8      # 批量推理大小（批量MCTS专用）
     C_PUCT = 1.5             # PUCT探索常数
     DIRICHLET_ALPHA = 0.3    # Dirichlet噪声alpha
     DIRICHLET_EPSILON = 0.25 # Dirichlet噪声混合比例
+    USE_BATCHED_MCTS = True  # 是否使用批量MCTS（显著提升性能）
 
     # ===== 温度控制 =====
     TEMP_THRESHOLD_MOVE = 30 # 前30步使用温度1.0
@@ -76,7 +78,7 @@ class TrainingConfig:
         config.ITERATIONS = 5
         config.GAMES_PER_ITERATION = 10
         config.BATCH_SIZE = 64
-        config.REPLAY_BUFFER_SIZE = 1000
+        config.REPLAY_BUFFER_SIZE = 20000  # 增加缓冲区大小，避免数据溢出 (7000+ per iter)
         config.REPLAY_SAMPLE_SIZE = 500
         config.EVAL_FREQUENCY = 2
         config.CHECKPOINT_FREQUENCY = 5
@@ -95,7 +97,7 @@ TrainingConfig:
   MCTS: {self.MCTS_SIMULATIONS} simulations
   Training: {self.ITERATIONS} iterations, {self.GAMES_PER_ITERATION} games/iter
   Batch: {self.BATCH_SIZE}, LR: {self.LEARNING_RATE}
-  Buffer: {self.REPLAY_BUFFER_SIZE}, Sample: {self.REPLAY_SAMPLE_SIZE}
+  Buffer: {self.REPLAY_BUFFER_SIZE}
         """.strip()
 
 

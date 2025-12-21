@@ -128,7 +128,8 @@ class GameLogger:
 
         # 构建详细数据（转换numpy为list）
         detailed_data = {
-            **game_record,
+            **{k: (float(v) if isinstance(v, (np.floating, np.integer)) else v)
+               for k, v in game_record.items()},
             'moves': game_data.get('moves', []),
         }
 
@@ -163,12 +164,12 @@ class GameLogger:
             stats = {
                 'iteration': iteration,
                 'total_games': len(self.current_iteration_games),
-                'avg_moves': np.mean([g['num_moves'] for g in self.current_iteration_games]),
+                'avg_moves': float(np.mean([g['num_moves'] for g in self.current_iteration_games])),
                 'black_wins': sum(g['black_win'] for g in self.current_iteration_games),
                 'white_wins': sum(g['white_win'] for g in self.current_iteration_games),
                 'draws': sum(g['draw'] for g in self.current_iteration_games),
-                'avg_entropy': np.mean([g['avg_policy_entropy'] for g in self.current_iteration_games]),
-                'avg_game_duration': np.mean([g['game_duration_sec'] for g in self.current_iteration_games]),
+                'avg_entropy': float(np.mean([g['avg_policy_entropy'] for g in self.current_iteration_games])),
+                'avg_game_duration': float(np.mean([g['game_duration_sec'] for g in self.current_iteration_games])),
             }
 
             # 保存迭代汇总

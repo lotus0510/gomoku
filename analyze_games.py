@@ -3,9 +3,10 @@
 import os
 import json
 import pandas as pd
-import matplotlib.pyplot as plt
 from pathlib import Path
 
+# 不在顶层导入 matplotlib，避免无 GUI 环境报错
+# import matplotlib.pyplot as plt
 
 def load_games_summary(log_dir='logs/games'):
     """
@@ -45,6 +46,20 @@ def load_iteration_summary(log_dir='logs/games'):
     return iterations
 
 
+def load_training_history(checkpoint_dir='checkpoints'):
+    """加载训练历史 JSON"""
+    history_file = os.path.join(checkpoint_dir, 'training_history.json')
+    if not os.path.exists(history_file):
+        return {}
+    
+    try:
+        with open(history_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️  加载训练历史失败: {e}")
+        return {}
+
+
 def analyze_game_length(df):
     """分析游戏长度趋势"""
     print("\n" + "=" * 60)
@@ -53,9 +68,10 @@ def analyze_game_length(df):
 
     print(f"总游戏数: {len(df)}")
     print(f"平均步数: {df['num_moves'].mean():.1f}")
-    print(f"中位数步数: {df['num_moves'].median():.1f}")
-    print(f"最短游戏: {df['num_moves'].min()} 步")
-    print(f"最长游戏: {df['num_moves'].max()} 步")
+    if len(df) > 0:
+        print(f"中位数步数: {df['num_moves'].median():.1f}")
+        print(f"最短游戏: {df['num_moves'].min()} 步")
+        print(f"最长游戏: {df['num_moves'].max()} 步")
 
     # 按迭代分组统计
     by_iteration = df.groupby('iteration')['num_moves'].agg(['mean', 'std', 'count'])
@@ -70,6 +86,9 @@ def analyze_win_rate(df):
     print("=" * 60)
 
     total_games = len(df)
+    if total_games == 0:
+        return
+
     black_wins = df['black_win'].sum()
     white_wins = df['white_win'].sum()
     draws = df['draw'].sum()
@@ -91,8 +110,9 @@ def analyze_policy_entropy(df):
     print("=" * 60)
 
     print(f"平均策略熵: {df['avg_policy_entropy'].mean():.3f}")
-    print(f"最小策略熵: {df['avg_policy_entropy'].min():.3f} (更确定)")
-    print(f"最大策略熵: {df['avg_policy_entropy'].max():.3f} (更探索)")
+    if len(df) > 0:
+        print(f"最小策略熵: {df['avg_policy_entropy'].min():.3f} (更确定)")
+        print(f"最大策略熵: {df['avg_policy_entropy'].max():.3f} (更探索)")
 
     # 按迭代查看熵的变化
     by_iteration = df.groupby('iteration')['avg_policy_entropy'].mean()
@@ -132,15 +152,38 @@ def analyze_iteration_progress(iterations):
             print("\n⚠️  游戏步数减少 = 可能过度追求速胜")
 
 
-def plot_training_progress(df, iterations, save_path='logs/games/analysis.png'):
+def plot_training_progress(df, iterations, training_history=None, save_path='logs/games/analysis.png'):
     """绘制训练进度图表"""
     try:
         import matplotlib.pyplot as plt
         import matplotlib
+        from matplotlib.font_manager import FontProperties
+        
         matplotlib.use('Agg')  # 无GUI后端
 
+        # 设置中文字体
+        plt.rcParams['axes.unicode_minus'] = False # 解决负号显示问题
+        
+        # 尝试常见的中文字体
+        found_font = False
+        chinese_fonts = ['Microsoft JhengHei', 'Microsoft YaHei', 'SimHei', 'SimSun', 'Arial Unicode MS']
+        
+        for font in chinese_fonts:
+            try:
+                # 检查字体是否可用
+                if font in [f.name for f in matplotlib.font_manager.fontManager.ttflist]:
+                    plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
+                    print(f"✅ 使用字体: {font}")
+                    found_font = True
+                    break
+            except:
+                continue
+                
+        if not found_font:
+            print("⚠️  未找到常见中文字体，图表文字可能显示为方框")
+
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('训练游戏分析', fontsize=16, fontproperties='SimHei')
+        fig.suptitle('训练游戏分析', fontsize=16)
 
         # 1. 游戏长度趋势
         ax = axes[0, 0]
@@ -175,16 +218,30 @@ def plot_training_progress(df, iterations, save_path='logs/games/analysis.png'):
         ax.set_title('策略熵趋势（越低越确定）')
         ax.grid(True, alpha=0.3)
 
-        # 4. 游戏时长
+        # 4. AI vs 随机玩家胜率
         ax = axes[1, 1]
-        if iterations:
-            iter_nums = [it['iteration'] for it in iterations]
-            durations = [it['avg_game_duration'] for it in iterations]
-            ax.plot(iter_nums, durations, marker='^', color='orange')
+        if training_history:
+            iterations = training_history.get('iterations', [])
+            win_rates = training_history.get('win_rate_vs_random', [])
+            
+            # 过滤掉 None 值
+            valid_data = [(i, w) for i, w in zip(iterations, win_rates) if w is not None]
+            if valid_data:
+                valid_iters, valid_rates = zip(*valid_data)
+                ax.plot(valid_iters, valid_rates, marker='*', color='red', markersize=10, linestyle='-')
+                ax.set_ylim(-0.05, 1.05)
+                ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+                for i, r in zip(valid_iters, valid_rates):
+                    # 在点上方标注百分比
+                    ax.text(i, r + 0.02, f"{r:.0%}", ha='center', fontsize=9, color='darkred')
+            
             ax.set_xlabel('迭代次数')
-            ax.set_ylabel('时长（秒）')
-            ax.set_title('平均游戏时长')
+            ax.set_ylabel('胜率')
+            ax.set_title('AI vs 随机玩家胜率')
             ax.grid(True, alpha=0.3)
+        else:
+            # 如果没有历史数据，回退到显示游戏时长
+            ax.text(0.5, 0.5, "无评估数据", ha='center', va='center')
 
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -194,6 +251,8 @@ def plot_training_progress(df, iterations, save_path='logs/games/analysis.png'):
         print("\n⚠️  未安装matplotlib，跳过绘图")
     except Exception as e:
         print(f"\n⚠️  绘图失败: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def show_recent_games(df, n=10):
@@ -215,6 +274,7 @@ def main():
     # 加载数据
     df = load_games_summary()
     iterations = load_iteration_summary()
+    history = load_training_history()
 
     if df is None or len(df) == 0:
         print("\n❌ 没有找到游戏数据")
@@ -227,9 +287,24 @@ def main():
     analyze_policy_entropy(df)
     analyze_iteration_progress(iterations)
     show_recent_games(df, n=10)
+    
+    # 显示评估结果
+    if history and 'win_rate_vs_random' in history:
+        print("\n" + "=" * 60)
+        print("🏆 AI vs 随机玩家评估")
+        print("=" * 60)
+        win_rates = history['win_rate_vs_random']
+        iters = history['iterations']
+        has_eval = False
+        for i, wr in zip(iters, win_rates):
+            if wr is not None:
+                print(f"迭代 {i}: 胜率 {wr:.1%}")
+                has_eval = True
+        if not has_eval:
+            print("暂无评估数据")
 
     # 绘图
-    plot_training_progress(df, iterations)
+    plot_training_progress(df, iterations, history)
 
     print("\n" + "=" * 60)
     print("✅ 分析完成！")

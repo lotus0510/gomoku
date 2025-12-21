@@ -7,13 +7,45 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 import json
 import argparse
+import time
+import random
+import traceback
 import numpy as np
 import multiprocessing
 from datetime import datetime
 from tensorflow.keras.optimizers import Adam
 import tensorflow as tf
 
-# GPU 配置
+# ===== Phase 1: 混合精度训练 + XLA 编译优化 =====
+# 注意：当前使用 CPU 训练，混合精度已禁用
+# GPU 配置完成后，将 'float32' 改回 'mixed_float16'
+try:
+    from tensorflow.keras import mixed_precision
+
+    # CPU 模式：使用 FP32（混合精度在 CPU 上收益很小）
+    # GPU 模式：改为 'mixed_float16' 以获得 2-3x 加速
+    policy = mixed_precision.Policy('float32')  # ← CPU 模式
+    mixed_precision.set_global_policy(policy)
+    print(f"✅ 训练精度策略: {policy.name}")
+
+    if policy.name == 'float32':
+        print(f"   ⚠️  当前使用 CPU/FP32 模式")
+        print(f"   💡 GPU 配置后改为 'mixed_float16' 可获得 2-3x 加速")
+    else:
+        print(f"   计算 dtype: {policy.compute_dtype}")
+        print(f"   变量 dtype: {policy.variable_dtype}")
+
+    # 启用 XLA 编译（CPU 上也有小幅帮助）
+    tf.config.optimizer.set_jit(True)
+    print("✅ XLA 编译优化已启用")
+
+    MIXED_PRECISION_ENABLED = (policy.name == 'mixed_float16')
+except Exception as e:
+    print(f"⚠️  优化启用失败: {e}")
+    print("   将使用默认配置训练")
+    MIXED_PRECISION_ENABLED = False
+
+# GPU 配置（只在主进程打印信息）
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
@@ -25,19 +57,21 @@ if gpus:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
 
-        print(f"✅ 检测到 {len(gpus)} 个GPU，使用: {selected_gpu.name}")
+        # 只在主进程打印（避免多进程时重复输出）
+        if __name__ == '__main__':
+            print(f"✅ 检测到 {len(gpus)} 个GPU，使用: {selected_gpu.name}")
     except (RuntimeError, ValueError, IndexError) as e:
-        print(f"⚠️  GPU 配置错误: {e}，使用CPU")
+        if __name__ == '__main__':
+            print(f"⚠️  GPU 配置错误: {e}，使用CPU")
 
-from game import GomokuGame
 from core.neural_net import create_enhanced_model
 from core.mcts import MCTS
+from core.mcts_batched import BatchedMCTS
 from core.game_state import GameState
 from core.data_augmentation import get_symmetries
 from training.config import TrainingConfig
 from training.replay_buffer import PrioritizedReplayBuffer
 from training.game_logger import GameLogger
-from evaluation.elo_rating import EloRating
 from evaluation.arena import Arena
 
 
@@ -73,7 +107,8 @@ def init_worker(model_weights_path, config_dict):
     if os.path.exists(model_weights_path):
         _worker_model.load_weights(model_weights_path)
 
-    print(f"  [进程 {os.getpid()}] 模型已初始化")
+    # 静默初始化，避免8个进程同时打印造成混乱
+    # print(f"  [进程 {os.getpid()}] 模型已初始化")
 
 
 def run_self_play_game_worker(game_num):
@@ -91,7 +126,6 @@ def run_self_play_game_worker(game_num):
     global _worker_model, _worker_config
 
     try:
-        import time
         start_time = time.time()
 
         print(f"  [进程 {os.getpid()}] 开始第 {game_num + 1} 局...")
@@ -100,8 +134,12 @@ def run_self_play_game_worker(game_num):
         model = _worker_model
         config = _worker_config
 
-        # 创建MCTS
-        mcts = MCTS(model, config)
+        # 创建MCTS（根据配置选择批量或标准版本）
+        use_batched = getattr(config, 'USE_BATCHED_MCTS', False)
+        if use_batched:
+            mcts = BatchedMCTS(model, config)
+        else:
+            mcts = MCTS(model, config)
 
         # 创建游戏
         state = GameState(board_size=config.BOARD_SIZE)
@@ -187,9 +225,115 @@ def run_self_play_game_worker(game_num):
 
     except Exception as e:
         print(f"  [进程 {os.getpid()}] 错误：第 {game_num + 1} 局失败 - {str(e)}")
-        import traceback
         traceback.print_exc()
         return [], {}  # 返回空数据，避免整个训练崩溃
+
+
+def save_iteration_summary(iteration, config, avg_loss, win_rate, selfplay_time,
+                           training_time, eval_time, iteration_time, replay_buffer_size,
+                           games_metadata, model):
+    """
+    保存迭代摘要文件（繁體中文白話版）
+
+    Args:
+        iteration: 迭代編號
+        config: 訓練配置
+        avg_loss: 平均損失字典
+        win_rate: 對隨機玩家勝率
+        selfplay_time: 自我對弈耗時
+        training_time: 模型訓練耗時
+        eval_time: 評估耗時
+        iteration_time: 迭代總耗時
+        replay_buffer_size: 緩衝區大小
+        games_metadata: 遊戲元數據列表
+        model: 模型對象
+    """
+    # 計算遊戲統計
+    if games_metadata:
+        avg_moves = np.mean([g['num_moves'] for g in games_metadata])
+        avg_mcts_time = np.mean([g['avg_mcts_time'] for g in games_metadata])
+        black_wins = sum(1 for g in games_metadata if g['winner'] == 1)
+        white_wins = sum(1 for g in games_metadata if g['winner'] == -1)
+        draws = sum(1 for g in games_metadata if g['winner'] == 0)
+        total_games = len(games_metadata)
+    else:
+        avg_moves = avg_mcts_time = black_wins = white_wins = draws = total_games = 0
+
+    # 獲取當前學習率
+    current_lr = model.optimizer.learning_rate
+    if hasattr(current_lr, 'numpy'):
+        current_lr = float(current_lr.numpy())
+    elif hasattr(current_lr, '__call__'):
+        current_lr = float(current_lr(model.optimizer.iterations))
+    else:
+        current_lr = float(current_lr)
+
+    # 計算模型參數量
+    trainable_params = sum([np.prod(v.shape) for v in model.trainable_weights])
+
+    # 準備摘要內容
+    summary_lines = [
+        "=" * 80,
+        f"第 {iteration} 次迭代訓練摘要",
+        "=" * 80,
+        "",
+        "【基本指標】",
+        f"  • 總損失：{avg_loss['loss']:.4f}",
+        f"  • 策略損失：{avg_loss['policy_output_loss']:.4f}",
+        f"  • 價值損失：{avg_loss['value_output_loss']:.4f}",
+    ]
+
+    if win_rate is not None:
+        summary_lines.append(f"  • 對隨機玩家勝率：{win_rate:.1%}")
+    else:
+        summary_lines.append(f"  • 對隨機玩家勝率：本次未評估")
+
+    summary_lines.extend([
+        "",
+        "【性能統計】",
+        f"  • 自我對弈耗時：{selfplay_time:.1f} 秒（{selfplay_time/60:.1f} 分鐘）",
+        f"  • 模型訓練耗時：{training_time:.1f} 秒",
+    ])
+
+    if eval_time > 0:
+        summary_lines.append(f"  • 模型評估耗時：{eval_time:.1f} 秒")
+
+    summary_lines.extend([
+        f"  • 迭代總耗時：{iteration_time:.1f} 秒（{iteration_time/60:.1f} 分鐘）",
+        "",
+        "【遊戲統計】",
+        f"  • 本次對弈局數：{total_games} 局",
+        f"  • 平均每局步數：{avg_moves:.1f} 步",
+        f"  • 平均 MCTS 搜索時間：{avg_mcts_time:.3f} 秒/步",
+        f"  • 黑方勝率：{black_wins}/{total_games} = {black_wins/total_games*100 if total_games > 0 else 0:.1f}%",
+        f"  • 白方勝率：{white_wins}/{total_games} = {white_wins/total_games*100 if total_games > 0 else 0:.1f}%",
+        f"  • 平局率：{draws}/{total_games} = {draws/total_games*100 if total_games > 0 else 0:.1f}%",
+        "",
+        "【系統狀態】",
+        f"  • 經驗回放緩衝區：{replay_buffer_size}/{config.REPLAY_BUFFER_SIZE} ({replay_buffer_size/config.REPLAY_BUFFER_SIZE*100:.1f}% 已使用)",
+        f"  • 當前學習率：{current_lr:.6f}",
+        f"  • 模型參數量：{trainable_params:,} 個可訓練參數",
+        f"  • 並行工作進程：{config.NUM_WORKERS} 個",
+        "",
+        "【訓練進度】",
+        f"  • 已完成：{iteration}/{config.ITERATIONS} 次迭代（{iteration/config.ITERATIONS*100:.1f}%）",
+        f"  • 預計剩餘時間：{(config.ITERATIONS - iteration) * iteration_time / 60:.1f} 分鐘",
+        "",
+        "=" * 80,
+        f"摘要生成時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "=" * 80,
+    ])
+
+    # 保存到文件
+    summary_dir = os.path.join(config.CHECKPOINT_DIR, 'summaries')
+    os.makedirs(summary_dir, exist_ok=True)
+
+    summary_path = os.path.join(summary_dir, f'iteration_{iteration:04d}_summary.txt')
+
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(summary_lines))
+
+    print(f"  保存迭代摘要: {summary_path}")
 
 
 def evaluate_vs_random(model, config, num_games=20):
@@ -201,7 +345,6 @@ def evaluate_vs_random(model, config, num_games=20):
     """
     class RandomPlayer:
         def get_action(self, state):
-            import random
             legal_moves = state.get_legal_moves()
             return random.choice(legal_moves) if legal_moves else None
 
@@ -227,7 +370,6 @@ def evaluate_vs_random(model, config, num_games=20):
             if masked_policy.sum() > 0:
                 move_idx = np.argmax(masked_policy)
             else:
-                import random
                 move_idx = random.choice(legal_indices)
 
             row, col = divmod(move_idx, self.board_size)
@@ -278,9 +420,17 @@ def train(config, resume_from=None):
         staircase=True
     )
 
+    # 创建优化器
+    optimizer = Adam(learning_rate=lr_schedule, clipnorm=config.GRADIENT_CLIP_NORM)
+
+    # 如果启用混合精度，包装优化器以支持损失缩放
+    if MIXED_PRECISION_ENABLED:
+        optimizer = mixed_precision.LossScaleOptimizer(optimizer)
+        print(f"✅ 优化器已包装为 LossScaleOptimizer（防止下溢）")
+
     # 编译模型
     model.compile(
-        optimizer=Adam(learning_rate=lr_schedule, clipnorm=config.GRADIENT_CLIP_NORM),
+        optimizer=optimizer,
         loss={
             'policy_output': 'categorical_crossentropy',
             'value_output': tf.keras.losses.Huber(delta=1.0)
@@ -329,12 +479,15 @@ def train(config, resume_from=None):
 
     # 训练循环
     for iteration in range(start_iteration, config.ITERATIONS):
+        iteration_start_time = time.time()
+
         print(f"\n{'=' * 60}")
         print(f"迭代 {iteration + 1}/{config.ITERATIONS}")
         print(f"{'=' * 60}")
 
         # 1. 自我对弈
         print(f"\n[1/4] 自我对弈 {config.GAMES_PER_ITERATION} 局（{config.NUM_WORKERS}个进程）...")
+        selfplay_start_time = time.time()
 
         # 保存当前模型供worker使用
         model.save_weights(model_weights_path)
@@ -359,22 +512,36 @@ def train(config, resume_from=None):
             if game_metadata:  # 如果不为空
                 all_games_metadata.append(game_metadata)
 
+        selfplay_time = time.time() - selfplay_start_time
         print(f"  收集到 {len(all_games_data)} 步训练数据，{len(all_games_metadata)} 局游戏")
+        print(f"  自我对弈耗时: {selfplay_time:.1f}秒 ({selfplay_time/60:.1f}分钟)")
 
         # 记录每局游戏到日志
         for game_num, metadata in enumerate(all_games_metadata):
             game_logger.log_game(iteration + 1, game_num, metadata)
 
-        # 2. 数据增强
-        print(f"\n[2/4] 数据增强（8种对称变换）...")
-        augmented_data = []
-        for state, policy, value in all_games_data:
-            # 使用全部8种对称变换，而非随机选1种
-            symmetries = get_symmetries(state, policy, config.BOARD_SIZE)
-            for aug_state, aug_policy in symmetries:
-                augmented_data.append((aug_state, aug_policy, value))
+        # 2. 数据增强（并行化）
+        print(f"\n[2/4] 数据增强（8种对称变换，并行处理）...")
+        augment_start_time = time.time()
 
+        # 并行处理数据增强
+        def augment_single_data(data_tuple):
+            """对单个数据进行8种对称变换"""
+            state, policy, value = data_tuple
+            symmetries = get_symmetries(state, policy, config.BOARD_SIZE)
+            return [(aug_state, aug_policy, value) for aug_state, aug_policy in symmetries]
+
+        # 使用多进程并行处理（使用CPU核心数的一半避免过载）
+        num_aug_workers = max(1, config.NUM_WORKERS // 2)
+        with multiprocessing.Pool(processes=num_aug_workers) as pool:
+            augmented_results = pool.map(augment_single_data, all_games_data)
+
+        # 展平结果
+        augmented_data = [item for sublist in augmented_results for item in sublist]
+
+        augment_time = time.time() - augment_start_time
         print(f"  增强后数据: {len(all_games_data)} -> {len(augmented_data)} (8x)")
+        print(f"  数据增强耗时: {augment_time:.1f}秒（使用{num_aug_workers}个进程）")
 
         # 添加到回放缓冲区
         for data in augmented_data:
@@ -384,6 +551,7 @@ def train(config, resume_from=None):
 
         # 3. 训练模型
         print(f"\n[3/4] 训练模型（{config.EPOCHS_PER_ITERATION} epochs）...")
+        training_start_time = time.time()
 
         if len(replay_buffer) < config.BATCH_SIZE:
             print(f"  缓冲区数据不足，跳过训练")
@@ -440,16 +608,56 @@ def train(config, resume_from=None):
             'value_output_loss': np.mean([l['value_output_loss'] for l in epoch_losses])
         }
 
+        # ===== Phase 1: NaN 检测和处理 =====
+        if np.isnan(avg_loss['loss']) or np.isinf(avg_loss['loss']):
+            print(f"\n🔴 检测到 NaN/Inf 损失！")
+            print(f"   总损失: {avg_loss['loss']}")
+            print(f"   策略损失: {avg_loss['policy_output_loss']}")
+            print(f"   价值损失: {avg_loss['value_output_loss']}")
+
+            if MIXED_PRECISION_ENABLED:
+                print(f"\n⚠️  可能是混合精度训练导致的数值不稳定")
+                print(f"   建议:")
+                print(f"   1. 检查学习率是否过大")
+                print(f"   2. 增加梯度裁剪")
+                print(f"   3. 如果问题持续，在 train_pipeline.py 开头设置:")
+                print(f"      mixed_precision.Policy('float32')")
+
+            # 保存问题检查点
+            error_checkpoint = os.path.join(
+                config.CHECKPOINT_DIR,
+                f'error_iter_{iteration+1}_nan.weights.h5'
+            )
+            model.save_weights(error_checkpoint)
+            print(f"   已保存错误检查点: {error_checkpoint}")
+
+            # 选择：继续或停止
+            print(f"\n   训练将继续，但结果可能不可靠")
+
+        training_time = time.time() - training_start_time
         print(f"  总损失: {avg_loss['loss']:.4f}, "
               f"策略: {avg_loss['policy_output_loss']:.4f}, "
               f"价值: {avg_loss['value_output_loss']:.4f}")
+        print(f"  模型训练耗时: {training_time:.1f}秒")
+
+        # 如果启用混合精度，打印损失缩放信息
+        if MIXED_PRECISION_ENABLED and hasattr(optimizer, 'loss_scale'):
+            current_scale = optimizer.loss_scale
+            if hasattr(current_scale, '_current_loss_scale'):
+                print(f"  当前损失缩放: {current_scale._current_loss_scale}")
+            elif hasattr(current_scale, 'numpy'):
+                print(f"  当前损失缩放: {current_scale.numpy()}")
 
         # 4. 评估
         win_rate = None
+        eval_time = 0
         if (iteration + 1) % config.EVAL_FREQUENCY == 0:
             print(f"\n[4/4] 评估模型 vs 随机玩家...")
+            eval_start_time = time.time()
             win_rate = evaluate_vs_random(model, config, num_games=config.EVAL_GAMES)
+            eval_time = time.time() - eval_start_time
             print(f"  胜率: {win_rate:.3f}")
+            print(f"  评估耗时: {eval_time:.1f}秒")
 
         # 记录历史
         history['iterations'].append(iteration + 1)
@@ -495,6 +703,27 @@ def train(config, resume_from=None):
 
         # 完成本次迭代的游戏日志
         game_logger.finish_iteration(iteration + 1)
+
+        # 打印本次迭代总耗时
+        iteration_time = time.time() - iteration_start_time
+        print(f"\n{'=' * 60}")
+        print(f"迭代 {iteration + 1} 总耗时: {iteration_time:.1f}秒 ({iteration_time/60:.1f}分钟)")
+        print(f"{'=' * 60}")
+
+        # 保存迭代摘要（繁體中文白話版）
+        save_iteration_summary(
+            iteration=iteration + 1,
+            config=config,
+            avg_loss=avg_loss,
+            win_rate=win_rate,
+            selfplay_time=selfplay_time,
+            training_time=training_time,
+            eval_time=eval_time,
+            iteration_time=iteration_time,
+            replay_buffer_size=len(replay_buffer),
+            games_metadata=all_games_metadata,
+            model=model
+        )
 
     print(f"\n{'=' * 60}")
     print("训练完成！")
