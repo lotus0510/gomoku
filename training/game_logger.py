@@ -34,14 +34,16 @@ class GameLogger:
             self.current_iteration_games = []
 
     def _init_summary_file(self):
-        """初始化CSV汇总文件"""
+        """初始化CSV汇总文件（扩展版）"""
         if not os.path.exists(self.summary_file):
             with open(self.summary_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow([
                     'iteration', 'game_num', 'num_moves', 'winner',
                     'game_duration_sec', 'avg_mcts_time', 'black_win',
-                    'white_win', 'draw', 'avg_policy_entropy'
+                    'white_win', 'draw', 'avg_policy_entropy',
+                    # 新增策略质量指标
+                    'avg_policy_top1_prob', 'policy_diversity', 'max_policy_entropy', 'min_policy_entropy'
                 ])
 
     def log_game(self, iteration, game_num, game_data):
@@ -76,24 +78,40 @@ class GameLogger:
                 'draw': 1 if game_data.get('winner') == 0 else 0,
             }
 
-            # 计算策略熵（衡量探索程度）
+            # 计算策略质量指标
             if 'policies' in game_data:
                 entropies = []
+                top1_probs = []
+
                 for policy in game_data['policies']:
                     # 只计算非零概率的熵
                     valid_probs = policy[policy > 1e-8]
                     if len(valid_probs) > 0:
                         entropy = -np.sum(valid_probs * np.log(valid_probs + 1e-8))
                         entropies.append(entropy)
+
+                    # Top-1 概率（最优动作的置信度）
+                    top1_prob = np.max(policy)
+                    top1_probs.append(top1_prob)
+
                 game_record['avg_policy_entropy'] = np.mean(entropies) if entropies else 0
+                game_record['avg_policy_top1_prob'] = np.mean(top1_probs) if top1_probs else 0
+                game_record['max_policy_entropy'] = np.max(entropies) if entropies else 0
+                game_record['min_policy_entropy'] = np.min(entropies) if entropies else 0
+                # 策略多样性（熵的标准差）
+                game_record['policy_diversity'] = np.std(entropies) if len(entropies) > 1 else 0
             else:
                 game_record['avg_policy_entropy'] = 0
+                game_record['avg_policy_top1_prob'] = 0
+                game_record['max_policy_entropy'] = 0
+                game_record['min_policy_entropy'] = 0
+                game_record['policy_diversity'] = 0
 
             # 添加时间统计
             game_record['game_duration_sec'] = game_data.get('duration', 0)
             game_record['avg_mcts_time'] = game_data.get('avg_mcts_time', 0)
 
-            # 写入CSV汇总
+            # 写入CSV汇总（包含新增指标）
             with open(self.summary_file, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow([
@@ -106,7 +124,11 @@ class GameLogger:
                     game_record['black_win'],
                     game_record['white_win'],
                     game_record['draw'],
-                    game_record['avg_policy_entropy']
+                    game_record['avg_policy_entropy'],
+                    game_record['avg_policy_top1_prob'],
+                    game_record['policy_diversity'],
+                    game_record['max_policy_entropy'],
+                    game_record['min_policy_entropy']
                 ])
 
             # 添加到当前迭代游戏列表

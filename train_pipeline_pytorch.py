@@ -428,12 +428,14 @@ def train(config, resume_from=None):
     # 将优化器附加到模型（用于 save_iteration_summary）
     model.optimizer = optimizer
     
-    # 加载检查点
+    # 加载检查点（自动恢复训练）
     start_iteration = 0
     model_state_path = os.path.join(config.CHECKPOINT_DIR, 'latest_model.pth')
-    
+    history_path = os.path.join(config.CHECKPOINT_DIR, 'training_history.json')
+
+    # 如果指定了 resume_from，使用指定的检查点
     if resume_from and os.path.exists(resume_from):
-        print(f"從檢查點恢復訓練: {resume_from}")
+        print(f"從指定檢查點恢復訓練: {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -442,6 +444,32 @@ def train(config, resume_from=None):
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
         start_iteration = checkpoint.get('iteration', 0)
         print(f"從第 {start_iteration + 1} 次迭代繼續")
+    # 自动检测：如果存在训练历史，自动从最新检查点恢复
+    elif os.path.exists(history_path):
+        try:
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+            if history.get('iterations'):
+                latest_iter = history['iterations'][-1]
+                latest_checkpoint = os.path.join(config.CHECKPOINT_DIR, f'checkpoint_iter_{latest_iter}.pth')
+
+                if os.path.exists(latest_checkpoint):
+                    print(f"🔄 檢測到已有訓練記錄（迭代 {latest_iter}）")
+                    print(f"自動從檢查點恢復: {latest_checkpoint}")
+                    checkpoint = torch.load(latest_checkpoint, map_location=device, weights_only=True)
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    if use_amp and 'scaler_state_dict' in checkpoint:
+                        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                    start_iteration = latest_iter
+                    print(f"✅ 訓練將從第 {start_iteration + 1} 次迭代繼續")
+                else:
+                    print(f"⚠️  找不到檢查點 {latest_checkpoint}，從頭開始訓練")
+        except Exception as e:
+            print(f"⚠️  讀取訓練歷史失敗: {e}")
+            print("從頭開始訓練")
+    # 如果只有 latest_model.pth，载入模型但从迭代1开始
     elif os.path.exists(model_state_path):
         print(f"載入已有模型: {model_state_path}")
         model.load_state_dict(torch.load(model_state_path, map_location=device, weights_only=True))
@@ -462,13 +490,24 @@ def train(config, resume_from=None):
         detailed_frequency=detailed_frequency
     )
     
-    # 训练历史
+    # 训练历史（扩展版）
     history = {
         'iterations': [],
         'total_loss': [],
         'policy_loss': [],
         'value_loss': [],
-        'win_rate_vs_random': []
+        'win_rate_vs_random': [],
+        # 新增追踪指标
+        'gradient_norm': [],
+        'gradient_norm_std': [],
+        'value_mae': [],
+        'value_std': [],
+        'policy_top1_prob': [],
+        'policy_entropy_train': [],  # 训练时的策略熵
+        'loss_std': [],
+        'policy_loss_std': [],
+        'value_loss_std': [],
+        'learning_rate': []
     }
     
     # 训练循环
@@ -573,7 +612,7 @@ def train(config, resume_from=None):
             optimizer.zero_grad()
             
             if use_amp:
-                with autocast():
+                with torch.amp.autocast('cuda'):
                     policy_pred, value_pred = model(X)
                     
                     # 计算损失
@@ -597,11 +636,11 @@ def train(config, resume_from=None):
                 
                 # 反向传播
                 scaler.scale(loss).backward()
-                
+
                 # 梯度裁剪
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.GRADIENT_CLIP_NORM)
-                
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.GRADIENT_CLIP_NORM)
+
                 # 优化器步骤
                 scaler.step(optimizer)
                 scaler.update()
@@ -630,18 +669,33 @@ def train(config, resume_from=None):
                 
                 # 反向传播
                 loss.backward()
-                
-                # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.GRADIENT_CLIP_NORM)
-                
+
+                # 梯度裁剪（返回裁剪前的范数）
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.GRADIENT_CLIP_NORM)
+
                 # 优化器步骤
                 optimizer.step()
-            
-            # 记录损失
+
+            # 计算价值预测误差
+            with torch.no_grad():
+                value_mae = torch.abs(value_pred.squeeze() - y_value).mean().item()
+                value_std = value_pred.squeeze().std().item()
+
+                # 策略质量指标
+                policy_probs = F.softmax(policy_pred, dim=1)
+                policy_top1_prob = policy_probs.max(dim=1)[0].mean().item()
+                policy_entropy = -(policy_probs * torch.log(policy_probs + 1e-8)).sum(dim=1).mean().item()
+
+            # 记录损失和新增指标
             epoch_losses.append({
                 'loss': loss.item(),
                 'policy_loss': policy_loss.mean().item(),
-                'value_loss': value_loss.mean().item()
+                'value_loss': value_loss.mean().item(),
+                'gradient_norm': grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                'value_mae': value_mae,
+                'value_std': value_std,
+                'policy_top1_prob': policy_top1_prob,
+                'policy_entropy': policy_entropy
             })
             
             # 保存最后一个批次用于更新优先级
@@ -666,11 +720,20 @@ def train(config, resume_from=None):
             # 更新优先级
             replay_buffer.update_priorities(last_indices, td_errors)
         
-        # 计算平均损失
+        # 计算平均损失和新增指标
         avg_loss = {
             'loss': np.mean([l['loss'] for l in epoch_losses]),
             'policy_loss': np.mean([l['policy_loss'] for l in epoch_losses]),
-            'value_loss': np.mean([l['value_loss'] for l in epoch_losses])
+            'value_loss': np.mean([l['value_loss'] for l in epoch_losses]),
+            'gradient_norm': np.mean([l['gradient_norm'] for l in epoch_losses]),
+            'gradient_norm_std': np.std([l['gradient_norm'] for l in epoch_losses]),
+            'value_mae': np.mean([l['value_mae'] for l in epoch_losses]),
+            'value_std': np.mean([l['value_std'] for l in epoch_losses]),
+            'policy_top1_prob': np.mean([l['policy_top1_prob'] for l in epoch_losses]),
+            'policy_entropy': np.mean([l['policy_entropy'] for l in epoch_losses]),
+            'loss_std': np.std([l['loss'] for l in epoch_losses]),
+            'policy_loss_std': np.std([l['policy_loss'] for l in epoch_losses]),
+            'value_loss_std': np.std([l['value_loss'] for l in epoch_losses])
         }
         
         # NaN 检测
@@ -694,9 +757,13 @@ def train(config, resume_from=None):
             print(f"\n   訓練將繼續，但結果可能不可靠")
         
         training_time = time.time() - training_start_time
-        print(f"  總損失: {avg_loss['loss']:.4f}, "
+        print(f"  總損失: {avg_loss['loss']:.4f} (±{avg_loss['loss_std']:.4f}), "
               f"策略: {avg_loss['policy_loss']:.4f}, "
               f"價值: {avg_loss['value_loss']:.4f}")
+        print(f"  梯度範數: {avg_loss['gradient_norm']:.4f} (±{avg_loss['gradient_norm_std']:.4f}), "
+              f"價值MAE: {avg_loss['value_mae']:.4f}")
+        print(f"  策略Top-1機率: {avg_loss['policy_top1_prob']:.4f}, "
+              f"策略熵: {avg_loss['policy_entropy']:.4f}")
         print(f"  模型訓練耗時: {training_time:.1f}秒")
         
         # 4. 评估
@@ -710,12 +777,23 @@ def train(config, resume_from=None):
             print(f"  勝率: {win_rate:.3f}")
             print(f"  評估耗時: {eval_time:.1f}秒")
         
-        # 记录历史
+        # 记录历史（包含新增指标）
         history['iterations'].append(iteration + 1)
         history['total_loss'].append(avg_loss['loss'])
         history['policy_loss'].append(avg_loss['policy_loss'])
         history['value_loss'].append(avg_loss['value_loss'])
         history['win_rate_vs_random'].append(win_rate)
+        # 新增指标
+        history['gradient_norm'].append(avg_loss['gradient_norm'])
+        history['gradient_norm_std'].append(avg_loss['gradient_norm_std'])
+        history['value_mae'].append(avg_loss['value_mae'])
+        history['value_std'].append(avg_loss['value_std'])
+        history['policy_top1_prob'].append(avg_loss['policy_top1_prob'])
+        history['policy_entropy_train'].append(avg_loss['policy_entropy'])
+        history['loss_std'].append(avg_loss['loss_std'])
+        history['policy_loss_std'].append(avg_loss['policy_loss_std'])
+        history['value_loss_std'].append(avg_loss['value_loss_std'])
+        history['learning_rate'].append(optimizer.param_groups[0]['lr'])
         
         # 保存检查点
         if (iteration + 1) % config.CHECKPOINT_FREQUENCY == 0:
