@@ -1,0 +1,105 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "created": "2025-12-26T23:58:00+08:00",
+    "last_updated": "2025-12-26T23:58:00+08:00",
+    "total_stops": 0,
+    "total_events": 1,
+    "description": "訓練事件與配置變更記錄"
+  },
+  "training_events": [
+    {
+      "event_id": 1,
+      "event_type": "configuration_fix",
+      "timestamp": "2025-12-26T23:58:00+08:00",
+      "title": "修正模型架構不匹配與恢復 GPU 推理",
+      "description": "在嘗試恢復 GPU 推理時發現模型架構不匹配錯誤，已撤銷架構修改並成功恢復訓練",
+
+      "problem": {
+        "issue": "RuntimeError: 模型架構不匹配",
+        "details": [
+          "已保存的 checkpoint (latest_model.pth): 10 ResBlocks, 128 Filters",
+          "當前優化配置: 6 ResBlocks, 96 Filters",
+          "無法載入已訓練的模型權重"
+        ],
+        "severity": "critical",
+        "impact": "訓練無法啟動"
+      },
+
+      "root_cause": {
+        "primary": "配置文件中的模型架構優化與已保存模型不兼容",
+        "details": [
+          "在 get_optimized_config() 中添加了模型規模縮減 (6 ResBlocks, 96 Filters)",
+          "目的是加速 CPU 推理，但未考慮與現有 checkpoint 的兼容性",
+          "已訓練模型使用原始架構 (10 ResBlocks, 128 Filters)"
+        ]
+      },
+
+      "actions_taken": [
+        {
+          "action": "撤銷模型架構修改",
+          "file": "training/config.py",
+          "changes": [
+            "移除 config.NUM_RES_BLOCKS = 6 的設定（恢復默認 10）",
+            "移除 config.NUM_FILTERS = 96 的設定（恢復默認 128）",
+            "刪除 lines 120-128 的模型優化區塊"
+          ]
+        },
+        {
+          "action": "恢復 GPU 推理",
+          "file": "train_pipeline_pytorch.py",
+          "changes": [
+            "將 device_str 從 'cpu' 改回 'cuda' (line 625)",
+            "Workers 現在使用 GPU 進行快速推理"
+          ]
+        }
+      ],
+
+      "configuration": {
+        "model_architecture": {
+          "NUM_RES_BLOCKS": 10,
+          "NUM_FILTERS": 128,
+          "note": "保持與已訓練模型一致"
+        },
+        "worker_device": "cuda",
+        "num_workers": 16,
+        "batch_size": 768,
+        "games_per_iteration": 150
+      },
+
+      "results": {
+        "immediate": [
+          "✅ 模型成功載入，無報錯",
+          "✅ Workers 使用 GPU 推理",
+          "✅ 訓練可以繼續進行"
+        ],
+        "expected": [
+          "推理速度應恢復到 ~30-40 秒/局（vs 之前 CPU 的 334 秒/局）",
+          "需要監控是否出現 CUDA busy 錯誤（16 workers 共用 GPU）"
+        ]
+      },
+
+      "lessons_learned": [
+        "修改模型架構前需要考慮與已訓練模型的兼容性",
+        "如需使用新架構，應該重新訓練或使用 strict=False 載入",
+        "性能優化（如縮減模型）需要權衡已有訓練成果"
+      ],
+
+      "related_files": [
+        "training/config.py (lines 120-128 已刪除)",
+        "train_pipeline_pytorch.py (line 625 已修改)",
+        "checkpoints/latest_model.pth (已有模型)"
+      ],
+
+      "next_steps": [
+        "監控訓練速度是否恢復到預期（30-40 秒/局）",
+        "觀察是否出現 CUDA busy 或 OOM 錯誤",
+        "如果 GPU 衝突，考慮降低 NUM_WORKERS 從 16 到 8",
+        "確認訓練指標（loss, MAE）是否正常"
+      ],
+
+      "recorder": "Claude Code",
+      "reviewed": false
+    }
+  ]
+}

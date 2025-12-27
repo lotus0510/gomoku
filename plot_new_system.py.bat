@@ -1,1 +1,0 @@
-plot_new_system.py

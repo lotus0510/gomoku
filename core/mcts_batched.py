@@ -1,4 +1,4 @@
-"""MCTS - 蒙特卡罗树搜索算法 (PyTorch 版本)"""
+"""MCTS批量推理版本 - 使用虛擬損失技術支持批量神經網絡推理 (PyTorch 版本)"""
 
 import numpy as np
 import math
@@ -7,7 +7,7 @@ from core.game_state import GameState
 
 
 class MCTSNode:
-    """MCTS树节点"""
+    """MCTS树节点（支持虚拟损失）"""
 
     def __init__(self, prior_prob=0.0):
         """
@@ -20,23 +20,26 @@ class MCTSNode:
         self.total_value = 0.0      # W(s,a) - 累计价值
         self.prior_prob = prior_prob # P(s,a) - 先验概率
         self.children = {}          # 子节点字典 {action: MCTSNode}
+        self.virtual_loss = 0       # 虚拟损失计数（用于并行搜索）
 
     def get_value(self):
         """获取节点平均价值 Q(s,a) = W(s,a) / N(s,a)"""
-        if self.visit_count == 0:
+        # 考虑虚拟损失的访问次数
+        total_visits = self.visit_count + self.virtual_loss
+        if total_visits == 0:
             return 0.0
-        return self.total_value / (self.visit_count + 1e-8)
+        return self.total_value / (total_visits + 1e-8)
 
     def is_leaf(self):
         """是否为叶节点"""
         return len(self.children) == 0
 
     def __repr__(self):
-        return f"MCTSNode(N={self.visit_count}, W={self.total_value:.2f}, P={self.prior_prob:.3f})"
+        return f"MCTSNode(N={self.visit_count}, W={self.total_value:.2f}, P={self.prior_prob:.3f}, VL={self.virtual_loss})"
 
 
-class MCTS:
-    """蒙特卡罗树搜索"""
+class BatchedMCTS:
+    """蒙特卡罗树搜索（批量推理版本）"""
 
     def __init__(self, model, config, device='cuda' if torch.cuda.is_available() else 'cpu'):
         """
@@ -55,9 +58,12 @@ class MCTS:
         self.dirichlet_epsilon = config.DIRICHLET_EPSILON
         self.board_size = config.BOARD_SIZE
 
+        # 批量推理参数
+        self.batch_size = getattr(config, 'MCTS_BATCH_SIZE', 8)  # 每批处理8个叶节点
+
     def search(self, state, add_noise=True):
         """
-        执行MCTS搜索
+        执行MCTS搜索（使用批量推理）
 
         Args:
             state: GameState 游戏状态
@@ -70,20 +76,69 @@ class MCTS:
         """
         root = MCTSNode(prior_prob=1.0)
 
-        # 扩展根节点
-        self._expand(root, state)
+        # 扩展根节点（单个推理）
+        self._expand_single(root, state)
 
         # 根节点添加Dirichlet噪声增加探索
         if add_noise:
             self._add_dirichlet_noise(root, state)
 
-        # 执行N次模拟
-        for _ in range(self.num_simulations):
-            # 克隆状态用于模拟
-            sim_state = state.clone()
+        # 批量执行模拟
+        num_batches = (self.num_simulations + self.batch_size - 1) // self.batch_size
 
-            # Selection + Expansion + Backup
-            self._simulate(root, sim_state)
+        for batch_idx in range(num_batches):
+            # 当前批次的模拟数量
+            current_batch_size = min(
+                self.batch_size,
+                self.num_simulations - batch_idx * self.batch_size
+            )
+
+            # 收集一批叶节点
+            leaf_nodes = []
+            leaf_states = []
+            paths = []
+
+            for _ in range(current_batch_size):
+                # 克隆状态用于模拟
+                sim_state = state.clone()
+
+                # Selection: 选择到叶节点
+                path, leaf_node = self._select_to_leaf(root, sim_state)
+
+                # 如果游戏未结束，收集叶节点
+                if not sim_state.is_game_over():
+                    leaf_nodes.append(leaf_node)
+                    leaf_states.append(sim_state)
+                    paths.append((path, None))  # None占位，稍后填入value
+                else:
+                    # 游戏结束，直接计算价值
+                    winner = sim_state.get_winner()
+                    current_player = sim_state.get_current_player()
+
+                    if winner == 0:
+                        value = 0.0  # 平局
+                    elif winner == current_player:
+                        value = 1.0  # 当前玩家赢
+                    else:
+                        value = -1.0  # 当前玩家输
+
+                    paths.append((path, value))
+
+            # 批量推理叶节点
+            if leaf_nodes:
+                values = self._expand_batch(leaf_nodes, leaf_states)
+
+                # 填入价值
+                value_idx = 0
+                for i, (path, val) in enumerate(paths):
+                    if val is None:  # 需要填入的
+                        paths[i] = (path, values[value_idx])
+                        value_idx += 1
+
+            # 批量反向传播
+            for path, value in paths:
+                if value is not None:
+                    self._backup(path, value)
 
         # 收集访问次数分布
         action_probs = self._get_action_probs(root, state)
@@ -93,45 +148,36 @@ class MCTS:
 
         return action_probs, root_value
 
-    def _simulate(self, node, state):
+    def _select_to_leaf(self, root, state):
         """
-        单次MCTS模拟
+        选择路径直到叶节点（使用虚拟损失）
 
         Args:
-            node: 当前节点
-            state: 当前游戏状态
+            root: 根节点
+            state: 游戏状态（会被修改）
+
+        Returns:
+            (path, leaf_node) tuple
+            - path: [(parent, child), ...] 路径
+            - leaf_node: 叶节点
         """
-        # 1. Selection: 递归选择子节点直到叶节点
-        path = []  # 记录路径用于反向传播
-        current_node = node
+        path = []
+        current_node = root
 
         while not current_node.is_leaf() and not state.is_game_over():
             # 选择最佳子节点
             action, child_node = self._select_child(current_node, state)
+
+            # 添加虚拟损失
+            child_node.virtual_loss += 1
+
             path.append((current_node, child_node))
 
             # 执行动作
             state.make_move(*action)
             current_node = child_node
 
-        # 2. Expansion & Evaluation
-        if state.is_game_over():
-            # 游戏结束，使用真实结果
-            winner = state.get_winner()
-            current_player = state.get_current_player()
-
-            if winner == 0:
-                value = 0.0  # 平局
-            elif winner == current_player:
-                value = 1.0  # 当前玩家赢
-            else:
-                value = -1.0  # 当前玩家输
-        else:
-            # 叶节点：扩展并评估
-            value = self._expand(current_node, state)
-
-        # 3. Backup: 反向传播价值
-        self._backup(path, value)
+        return path, current_node
 
     def _select_child(self, node, state):
         """
@@ -149,7 +195,7 @@ class MCTS:
         best_child = None
 
         legal_moves = state.get_legal_moves()
-        parent_visits = node.visit_count
+        parent_visits = node.visit_count + node.virtual_loss
 
         for action in legal_moves:
             action_key = action  # (row, col)
@@ -166,18 +212,18 @@ class MCTS:
 
     def _puct_score(self, node, parent_visits):
         """
-        计算PUCT分数
+        计算PUCT分数（考虑虚拟损失）
 
         PUCT = Q(s,a) + c_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
 
         Args:
             node: 子节点
-            parent_visits: 父节点访问次数
+            parent_visits: 父节点访问次数（含虚拟损失）
 
         Returns:
             PUCT分数
         """
-        # Q值：平均价值
+        # Q值：平均价值（已考虑虚拟损失）
         q_value = node.get_value()
 
         # U值：探索奖励
@@ -185,14 +231,14 @@ class MCTS:
             self.c_puct *
             node.prior_prob *
             math.sqrt(parent_visits) /
-            (1 + node.visit_count)
+            (1 + node.visit_count + node.virtual_loss)
         )
 
         return q_value + u_value
 
-    def _expand(self, node, state):
+    def _expand_single(self, node, state):
         """
-        扩展节点：调用神经网络评估
+        扩展单个节点：调用神经网络评估
 
         Args:
             node: 要扩展的节点
@@ -220,6 +266,63 @@ class MCTS:
         policy = policy.cpu().numpy()[0]  # 移除批次维度
         value = value.cpu().numpy()[0, 0]
 
+        # 创建子节点
+        self._create_children(node, state, policy)
+
+        return value
+
+    def _expand_batch(self, nodes, states):
+        """
+        批量扩展节点：批量调用神经网络评估
+
+        Args:
+            nodes: 要扩展的节点列表
+            states: 对应的状态列表
+
+        Returns:
+            价值估计列表
+        """
+        if not nodes:
+            return []
+
+        # 准备批量神经网络输入
+        batch_inputs = np.array([state.to_input() for state in states])
+
+        # 转换为 PyTorch 格式 (NHWC -> NCHW)
+        batch_inputs = np.transpose(batch_inputs, (0, 3, 1, 2))
+
+        # 转换为 PyTorch 张量
+        batch_inputs = torch.from_numpy(batch_inputs).float().to(self.device)
+
+        # 批量神经网络推理（无梯度）
+        self.model.eval()
+        with torch.no_grad():
+            batch_policies, batch_values = self.model(batch_inputs)
+
+        # 转换回 NumPy
+        batch_policies = batch_policies.cpu().numpy()
+        batch_values = batch_values.cpu().numpy()
+
+        # 为每个节点创建子节点
+        values = []
+        for i, (node, state) in enumerate(zip(nodes, states)):
+            policy = batch_policies[i]
+            value = batch_values[i, 0]
+
+            self._create_children(node, state, policy)
+            values.append(value)
+
+        return values
+
+    def _create_children(self, node, state, policy):
+        """
+        为节点创建子节点
+
+        Args:
+            node: 父节点
+            state: 当前状态
+            policy: 策略向量
+        """
         # 只对合法移动创建子节点
         legal_moves = state.get_legal_moves()
         legal_moves_indices = [r * self.board_size + c for r, c in legal_moves]
@@ -243,8 +346,6 @@ class MCTS:
 
             node.children[move] = MCTSNode(prior_prob=prior_prob)
 
-        return value
-
     def _add_dirichlet_noise(self, root, state):
         """
         为根节点添加Dirichlet噪声以增加探索
@@ -267,7 +368,7 @@ class MCTS:
 
     def _backup(self, path, value):
         """
-        反向传播价值
+        反向传播价值（移除虚拟损失）
 
         Args:
             path: [(parent, child), ...] 路径
@@ -275,6 +376,10 @@ class MCTS:
         """
         # 从叶节点向根节点传播
         for parent, child in reversed(path):
+            # 移除虚拟损失
+            child.virtual_loss -= 1
+
+            # 更新统计
             child.visit_count += 1
             child.total_value += value
             value = -value  # 价值在对手视角下取反
@@ -357,64 +462,3 @@ class MCTS:
         col = move_index % self.board_size
 
         return (row, col)
-
-
-if __name__ == '__main__':
-    from training.config import TrainingConfig
-    from core.neural_net import create_enhanced_model
-    import tensorflow as tf
-
-    print("=== 测试MCTS算法 ===\n")
-
-    # 创建配置
-    config = TrainingConfig.get_fast_test_config()
-    config.MCTS_SIMULATIONS = 50  # 快速测试用50次
-
-    # 创建模型
-    print("创建模型...")
-    model = create_enhanced_model(
-        board_size=config.BOARD_SIZE,
-        num_res_blocks=config.NUM_RES_BLOCKS,
-        num_filters=config.NUM_FILTERS
-    )
-
-    # 创建MCTS
-    print(f"创建MCTS（{config.MCTS_SIMULATIONS}次模拟）...")
-    mcts = MCTS(model, config)
-
-    # 创建测试状态
-    state = GameState(board_size=15)
-
-    # 在中心下几步棋
-    state.make_move(7, 7)
-    state.make_move(7, 8)
-    state.make_move(8, 7)
-
-    print(f"\n当前状态: {state}")
-    print(f"合法移动数: {len(state.get_legal_moves())}")
-
-    # 执行MCTS搜索
-    print(f"\n执行MCTS搜索...")
-    action_probs, value = mcts.search(state, add_noise=True)
-
-    print(f"  搜索完成")
-    print(f"  根节点价值估计: {value:.4f}")
-    print(f"  策略向量和: {action_probs.sum():.6f}")
-
-    # 找到top5移动
-    top5_indices = np.argsort(action_probs)[-5:][::-1]
-    print(f"\n  Top 5 移动:")
-    for i, idx in enumerate(top5_indices):
-        row, col = idx // 15, idx % 15
-        prob = action_probs[idx]
-        if prob > 0:
-            print(f"    {i+1}. ({row}, {col}): {prob:.4f}")
-
-    # 测试温度采样
-    print(f"\n测试温度采样...")
-    for temp in [1.0, 0.5, 0.1, 0.0]:
-        move = mcts.get_action_with_temperature(action_probs, temperature=temp)
-        prob = action_probs[move[0] * 15 + move[1]]
-        print(f"  温度={temp:.1f}: 移动{move}, 概率{prob:.4f}")
-
-    print("\n✓ MCTS算法测试通过！")
