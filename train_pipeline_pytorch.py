@@ -24,7 +24,9 @@ from core.data_augmentation import get_symmetries
 from training.config import TrainingConfig
 from training.replay_buffer import PrioritizedReplayBuffer
 from training.game_logger import GameLogger
-from evaluation.arena import Arena
+from interactive.arena import Arena
+from training.custom_reset_strategy import CustomResetStrategy
+from utils.config_logger import ConfigChangeLogger
 
 
 # 全局变量用于缓存模型（每个worker进程一份）
@@ -65,7 +67,7 @@ def init_worker(model_state_path, config_dict, device_str):
     
     # 加载权重
     if os.path.exists(model_state_path):
-        state_dict = torch.load(model_state_path, map_location=_worker_device, weights_only=True)
+        state_dict = torch.load(model_state_path, map_location=_worker_device, weights_only=False)
         _worker_model.load_state_dict(state_dict)
     
     # 设置为评估模式
@@ -391,7 +393,7 @@ def train(config, resume_from=None):
         print(f"混合精度訓練: 已啟用")
     else:
         print(f"混合精度訓練: 已禁用 (CPU 模式)")
-    
+
     # 创建目录
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     
@@ -436,13 +438,44 @@ def train(config, resume_from=None):
     # 如果指定了 resume_from，使用指定的检查点
     if resume_from and os.path.exists(resume_from):
         print(f"從指定檢查點恢復訓練: {resume_from}")
-        checkpoint = torch.load(resume_from, map_location=device, weights_only=True)
+        checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # 檢查配置是否變更（關鍵修復）
+        saved_config = checkpoint.get('config', None)
+        config_changed = False
+
+        # 初始化配置變更記錄器
+        config_logger = ConfigChangeLogger()
+
+        start_iteration = checkpoint.get('iteration', 0)
+
+        # 記錄所有配置變更
+        if saved_config:
+            config_changed = config_logger.log_resume_changes(
+                iteration=start_iteration,
+                old_config=saved_config,
+                new_config=config
+            )
+        if config_changed:
+            print("🔧 配置已變更，重新初始化學習率調度器")
+            # 重新創建調度器以使用新配置
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=config.LR_DECAY_STEPS,
+                gamma=config.LR_DECAY_RATE
+            )
+            # 將調度器推進到當前迭代
+            for _ in range(start_iteration):
+                scheduler.step()
+            print(f"✅ 調度器已同步到迭代 {start_iteration}")
+        else:
+            # 配置未變更，正常加載調度器狀態
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
         if use_amp and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        start_iteration = checkpoint.get('iteration', 0)
         print(f"從第 {start_iteration + 1} 次迭代繼續")
     # 自动检测：如果存在训练历史，自动从最新检查点恢复
     elif os.path.exists(history_path):
@@ -456,10 +489,41 @@ def train(config, resume_from=None):
                 if os.path.exists(latest_checkpoint):
                     print(f"🔄 檢測到已有訓練記錄（迭代 {latest_iter}）")
                     print(f"自動從檢查點恢復: {latest_checkpoint}")
-                    checkpoint = torch.load(latest_checkpoint, map_location=device, weights_only=True)
+                    checkpoint = torch.load(latest_checkpoint, map_location=device, weights_only=False)
                     model.load_state_dict(checkpoint['model_state_dict'])
                     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+                    # 檢查配置是否變更（關鍵修復）
+                    saved_config = checkpoint.get('config', None)
+                    config_changed = False
+
+                    # 初始化配置變更記錄器
+                    config_logger = ConfigChangeLogger()
+
+                    # 記錄所有配置變更（不僅僅是學習率相關）
+                    if saved_config:
+                        config_changed = config_logger.log_resume_changes(
+                            iteration=latest_iter,
+                            old_config=saved_config,
+                            new_config=config
+                        )
+
+                    if config_changed:
+                        print("🔧 配置已變更，重新初始化學習率調度器")
+                        # 重新創建調度器以使用新配置
+                        scheduler = torch.optim.lr_scheduler.StepLR(
+                            optimizer,
+                            step_size=config.LR_DECAY_STEPS,
+                            gamma=config.LR_DECAY_RATE
+                        )
+                        # 將調度器推進到當前迭代
+                        for _ in range(latest_iter):
+                            scheduler.step()
+                        print(f"✅ 調度器已同步到迭代 {latest_iter}")
+                    else:
+                        # 配置未變更，正常加載調度器狀態
+                        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
                     if use_amp and 'scaler_state_dict' in checkpoint:
                         scaler.load_state_dict(checkpoint['scaler_state_dict'])
                     start_iteration = latest_iter
@@ -472,7 +536,7 @@ def train(config, resume_from=None):
     # 如果只有 latest_model.pth，载入模型但从迭代1开始
     elif os.path.exists(model_state_path):
         print(f"載入已有模型: {model_state_path}")
-        model.load_state_dict(torch.load(model_state_path, map_location=device, weights_only=True))
+        model.load_state_dict(torch.load(model_state_path, map_location=device, weights_only=False))
     
     # 创建经验回放缓冲区
     replay_buffer = PrioritizedReplayBuffer(
@@ -509,7 +573,37 @@ def train(config, resume_from=None):
         'value_loss_std': [],
         'learning_rate': []
     }
-    
+
+    # 初始化價值崩潰重置策略（智能動態模式）
+    # 在載入 checkpoint 之後初始化，這樣 start_iteration 才是正確的
+    if start_iteration == 0:
+        # 新訓練：迭代50前不會觸發
+        reset_strategy = CustomResetStrategy(
+            target_iteration=10,     # 備用值（優先使用動態查找）
+            min_iteration=50,        # 迭代50前不會觸發
+            min_reset_interval=20
+        )
+        print("\n" + "=" * 60)
+        print("✅ 價值崩潰重置策略已啟用（智能模式）")
+        print(f"   觸發條件: Value Loss連續5次上升 + MAE>0.85")
+        print(f"   最早觸發: 迭代 {reset_strategy.min_iteration}（之前不會觸發）")
+        print(f"   回滾策略: 動態查找最後健康點（MAE<0.85, Grad>0.3）")
+        print(f"   安全邊際: 找到健康點後再往前退5次迭代")
+        print("=" * 60)
+    else:
+        # 恢復訓練：同樣使用動態查找
+        reset_strategy = CustomResetStrategy(
+            target_iteration=10,     # 備用值
+            min_iteration=start_iteration + 10,  # 至少再訓練10次才能觸發
+            min_reset_interval=20
+        )
+        print("\n" + "=" * 60)
+        print("✅ 價值崩潰重置策略已啟用（智能模式）")
+        print(f"   觸發條件: Value Loss連續5次上升 + MAE>0.85")
+        print(f"   最早觸發: 迭代 {reset_strategy.min_iteration}")
+        print(f"   回滾策略: 動態查找最後健康點（避免回滾到崩潰狀態）")
+        print("=" * 60)
+
     # 训练循环
     for iteration in range(start_iteration, config.ITERATIONS):
         iteration_start_time = time.time()
@@ -528,8 +622,9 @@ def train(config, resume_from=None):
         # 准备参数
         config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith('_')}
         game_numbers = list(range(config.GAMES_PER_ITERATION))
+        # Worker 使用 GPU 進行快速推理
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
+
         # 多进程自我对弈
         with multiprocessing.Pool(
             processes=config.NUM_WORKERS,
@@ -686,11 +781,15 @@ def train(config, resume_from=None):
                 policy_top1_prob = policy_probs.max(dim=1)[0].mean().item()
                 policy_entropy = -(policy_probs * torch.log(policy_probs + 1e-8)).sum(dim=1).mean().item()
 
+            # 计算加权损失（与总损失计算一致，用于记录）
+            weighted_policy_loss = (policy_loss * weights_tensor * config.POLICY_LOSS_WEIGHT).mean().item()
+            weighted_value_loss = (value_loss * weights_tensor * config.VALUE_LOSS_WEIGHT).mean().item()
+
             # 记录损失和新增指标
             epoch_losses.append({
                 'loss': loss.item(),
-                'policy_loss': policy_loss.mean().item(),
-                'value_loss': value_loss.mean().item(),
+                'policy_loss': weighted_policy_loss,
+                'value_loss': weighted_value_loss,
                 'gradient_norm': grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                 'value_mae': value_mae,
                 'value_std': value_std,
@@ -795,25 +894,46 @@ def train(config, resume_from=None):
         history['value_loss_std'].append(avg_loss['value_loss_std'])
         history['learning_rate'].append(optimizer.param_groups[0]['lr'])
         
-        # 保存检查点
+        # 保存检查点（使用臨時文件保證原子性）
         if (iteration + 1) % config.CHECKPOINT_FREQUENCY == 0:
             checkpoint_path = os.path.join(
                 config.CHECKPOINT_DIR,
                 f'checkpoint_iter_{iteration+1}.pth'
             )
-            torch.save({
-                'iteration': iteration + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'scaler_state_dict': scaler.state_dict() if scaler else None,
-                'history': history,
-                'config': config_dict
-            }, checkpoint_path)
-            print(f"  保存檢查點: {checkpoint_path}")
+            temp_checkpoint_path = checkpoint_path + '.tmp'
+
+            try:
+                torch.save({
+                    'iteration': iteration + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict() if scaler else None,
+                    'history': history,
+                    'config': config_dict
+                }, temp_checkpoint_path)
+
+                # 原子性重命名
+                if os.path.exists(checkpoint_path):
+                    os.remove(checkpoint_path)
+                os.rename(temp_checkpoint_path, checkpoint_path)
+                print(f"  保存檢查點: {checkpoint_path}")
+            except Exception as e:
+                print(f"  ⚠️ 保存檢查點失敗: {e}")
+                if os.path.exists(temp_checkpoint_path):
+                    os.remove(temp_checkpoint_path)
         
-        # 保存最新模型
-        torch.save(model.state_dict(), model_state_path)
+        # 保存最新模型（使用臨時文件保證原子性）
+        temp_model_path = model_state_path + '.tmp'
+        try:
+            torch.save(model.state_dict(), temp_model_path)
+            if os.path.exists(model_state_path):
+                os.remove(model_state_path)
+            os.rename(temp_model_path, model_state_path)
+        except Exception as e:
+            print(f"⚠️ 保存模型失敗: {e}")
+            if os.path.exists(temp_model_path):
+                os.remove(temp_model_path)
         
         # 保存训练历史
         history_path = os.path.join(config.CHECKPOINT_DIR, 'training_history.json')
@@ -834,9 +954,23 @@ def train(config, resume_from=None):
                 return obj
         
         history_native = convert_to_native(history)
-        
-        with open(history_path, 'w') as f:
-            json.dump(history_native, f, indent=2)
+
+        # 使用臨時文件保證原子性寫入（防止中途中斷導致數據損壞）
+        temp_history_path = history_path + '.tmp'
+        try:
+            with open(temp_history_path, 'w') as f:
+                json.dump(history_native, f, indent=2)
+
+            # 原子性重命名（Windows 需要先刪除目標文件）
+            if os.path.exists(history_path):
+                os.remove(history_path)
+            os.rename(temp_history_path, history_path)
+        except Exception as e:
+            print(f"⚠️ 保存訓練歷史失敗: {e}")
+            # 清理臨時文件
+            if os.path.exists(temp_history_path):
+                os.remove(temp_history_path)
+            raise
         
         # 完成本次迭代的游戏日志
         game_logger.finish_iteration(iteration + 1)
@@ -861,7 +995,41 @@ def train(config, resume_from=None):
             games_metadata=all_games_metadata,
             model=model
         )
-    
+
+        # 檢查是否需要重置
+        should_reset = reset_strategy.should_trigger(
+            training_history=history,
+            current_iteration=iteration + 1
+        )
+
+        if should_reset:
+            print(f"\n{'='*60}")
+            print(f"🔄 觸發價值崩潰重置 (迭代 {iteration + 1})")
+            print(f"{'='*60}\n")
+
+            # 執行重置（傳入訓練歷史以動態查找健康點）
+            config, replay_buffer, model = reset_strategy.execute_reset(
+                config=config,
+                buffer=replay_buffer,
+                model=model,
+                current_iteration=iteration + 1,
+                training_history=history
+            )
+
+            # 同步優化器學習率
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = config.LEARNING_RATE
+
+            # 重置學習率調度器
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=config.LR_DECAY_STEPS,
+                gamma=config.LR_DECAY_RATE
+            )
+
+            print(f"✅ 已同步優化器學習率: {config.LEARNING_RATE:.6f}")
+            print(f"✅ 重置完成，繼續訓練...\n")
+
     print(f"\n{'=' * 60}")
     print("訓練完成！")
     print(f"{'=' * 60}")
@@ -874,19 +1042,41 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='PyTorch 現代化五子棋AI訓練')
     parser.add_argument('--fast-test', '-f', action='store_true', help='使用快速測試配置')
+    parser.add_argument('--legacy', '-l', action='store_true', help='使用舊版配置（不推薦，僅用於對比）')
     parser.add_argument('--iterations', '-i', type=int, help='訓練迭代次數')
     parser.add_argument('--games', '-g', type=int, help='每次迭代遊戲局數')
     parser.add_argument('--resume', '-r', type=str, help='恢復訓練的檢查點路徑')
-    
+
     args = parser.parse_args()
-    
-    # 选择配置
+
+    # 选择配置 (默認使用優化配置)
     if args.fast_test:
         config = TrainingConfig.get_fast_test_config()
         print("使用快速測試配置")
-    else:
+    elif args.legacy:
         config = TrainingConfig.get_full_config()
-        print("使用完整訓練配置")
+        print("=" * 60)
+        print("⚠️  使用舊版配置（原始配置）")
+        print("=" * 60)
+        print("注意：此配置已知問題：")
+        print("  • DIRICHLET_EPSILON = 0.35 (過高，導致訓練目標隨機)")
+        print("  • LR_DECAY_STEPS = 100 (過早衰減)")
+        print("  • 不推薦使用，僅用於對比測試")
+        print("=" * 60)
+    else:
+        # 默認使用優化配置
+        config = TrainingConfig.get_optimized_config()
+        full_config = TrainingConfig.get_full_config()
+        print("=" * 60)
+        print("✅ 使用優化配置（默認）")
+        print("=" * 60)
+        print("關鍵改進：")
+        print(f"  • DIRICHLET_EPSILON: {full_config.DIRICHLET_EPSILON} → {config.DIRICHLET_EPSILON} ({(config.DIRICHLET_EPSILON/full_config.DIRICHLET_EPSILON-1)*100:+.0f}%)")
+        print(f"  • LR_DECAY_STEPS: {full_config.LR_DECAY_STEPS} → {config.LR_DECAY_STEPS} ({(config.LR_DECAY_STEPS/full_config.LR_DECAY_STEPS-1)*100:+.0f}%)")
+        print(f"  • REPLAY_BUFFER_SIZE: {full_config.REPLAY_BUFFER_SIZE//1000}K → {config.REPLAY_BUFFER_SIZE//1000}K ({(config.REPLAY_BUFFER_SIZE/full_config.REPLAY_BUFFER_SIZE-1)*100:+.0f}%)")
+        print(f"  • C_PUCT: {full_config.C_PUCT} → {config.C_PUCT} ({(config.C_PUCT/full_config.C_PUCT-1)*100:+.0f}%)")
+        print(f"  • BATCH_SIZE: {full_config.BATCH_SIZE} → {config.BATCH_SIZE} ({(config.BATCH_SIZE/full_config.BATCH_SIZE-1)*100:+.0f}%)")
+        print("=" * 60)
     
     # 覆盖配置
     if args.iterations:

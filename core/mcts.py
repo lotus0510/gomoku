@@ -279,6 +279,12 @@ class MCTS:
             child.total_value += value
             value = -value  # 价值在对手视角下取反
 
+        # 更新根节点（根节点不在path的child中，需要单独更新）
+        if path:
+            root = path[0][0]  # path的第一个parent就是root
+            root.visit_count += 1
+            root.total_value += value
+
     def _get_action_probs(self, root, state):
         """
         从MCTS树中提取改进的策略分布

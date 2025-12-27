@@ -1,289 +1,166 @@
-# 分析工具目錄
+# Analysis 分析工具
 
-這個目錄包含所有用於訓練分析和可視化的工具。
+简洁的训练分析工具集。
 
-## 📊 圖表生成工具
+---
 
-### `plot_comprehensive.py` - 綜合圖表分析（⭐ 推薦）
+## 🚀 使用方法
 
-**功能**: 生成 10 張詳細的分析圖表
+### 生成训练图表（最常用）
 
-**用法**:
 ```bash
 python analysis/plot_comprehensive.py
 ```
 
-**生成的圖表**:
+**输出**: `analysis/plots/` 目录下的10张详细图表
 
-1. **訓練指標總覽** (`1_training_metrics.png`)
-   - 總損失變化
-   - 梯度範數趨勢
-   - 學習率調度
-   - 對隨機玩家勝率
-
-2. **損失分解分析** (`2_loss_breakdown.png`)
-   - 三種損失對比
-   - 策略損失詳細
-   - 價值損失詳細
-   - 損失標準差
-
-3. **梯度健康度分析** (`3_gradient_analysis.png`)
-   - 梯度範數時間序列
-   - 梯度範數分佈
-   - 梯度穩定性
-   - 梯度健康度統計
-
-4. **價值網路分析** (`4_value_network_metrics.png`)
-   - 價值 MAE
-   - 價值標準差
-   - 策略 Top-1 機率
-   - 策略熵
-
-5. **遊戲長度分佈** (`5_game_length_distribution.png`)
-   - 整體長度分佈
-   - 按迭代的長度變化
-   - 長度分類統計
-   - 最近10次迭代箱型圖
-
-6. **勝率趨勢分析** (`6_win_rate_trends.png`)
-   - 黑白勝率對比
-   - 勝率堆疊圖
-   - 勝率不平衡度
-   - 最近趨勢
-
-7. **策略演化分析** (`7_strategy_evolution.png`)
-   - 超短局比例趨勢
-   - 短局比例趨勢
-   - 策略演化階段圖
-   - Edge-Rush 健康度評分
-
-8. **遊戲模式分析** (`8_game_patterns.png`)
-   - 長度vs勝率散點圖
-   - 按長度分類的勝率
-   - 最近10次迭代熱圖
-   - 統計摘要表
-
-9. **綜合儀表板** (`9_comprehensive_dashboard.png`)
-   - 9 個關鍵指標的總覽
-   - 一頁看清整體訓練狀態
-
-10. **指標相關性分析** (`10_correlation_matrix.png`)
-    - 各指標間的相關性矩陣
-    - 發現潛在關聯
-
-**輸出位置**: `analysis/plots/`
+**查看结果**:
+- 最重要：`plots/9_comprehensive_dashboard.png` - 综合仪表板
+- 其他：`plots/1-10` 各种详细分析图表
 
 ---
 
-## 📈 實時監控工具
+## 📊 可用工具
 
-### `monitor_training.py` - 實時訓練監控
+### plot_comprehensive.py ⭐⭐⭐⭐⭐
+**最重要的工具** - 生成10张详细训练分析图表
 
-**功能**: 實時顯示訓練進度
+**输出图表**:
+1. 训练指标总览（损失、梯度、学习率、胜率）
+2. 损失分解分析（策略/价值/总损失）
+3. 梯度健康度分析
+4. 价值网络指标（MAE）
+5. 游戏长度分布
+6. 胜率趋势（黑白对比）
+7. 策略演化（edge-rush问题）
+8. 游戏模式分析
+9. **综合仪表板**（一页总览）⭐
+10. 相关性矩阵
 
-**用法**:
+---
+
+### monitor_training.py ⭐⭐⭐
+实时训练监控工具
+
+**使用场景**: 训练进行中，在单独的终端运行
+
+**特点**: 每5秒自动刷新，显示最新训练状态
+
 ```bash
 python analysis/monitor_training.py
 ```
 
-**顯示內容**:
-- 已完成迭代數
-- 最新損失值
-- 損失歷史（最近10次）
-- 評估結果
-- 統計信息
-
-**特點**:
-- 每5秒自動刷新
-- 清屏顯示，易於閱讀
-- Ctrl+C 退出
-
 ---
 
-## 📊 進展分析工具
+### diagnose_training.py ⭐⭐⭐
+训练健康度诊断工具
 
-### `analyze_progress.py` - 訓練進展分析
+**使用场景**: 发现训练异常时
 
-**功能**: 詳細分析訓練進展，判斷是否需要繼續訓練
+**检查项**:
+- 胜率平衡性（黑白棋平衡）
+- 游戏长度异常（edge-rush）
+- 策略质量
+- 价值网络健康（MAE检查）
+- 梯度健康（消失/爆炸）
+- 训练稳定性
 
-**用法**:
 ```bash
-python analysis/analyze_progress.py
-```
-
-**分析內容**:
-1. **梯度範數分析**
-   - 最近10次迭代的梯度值
-   - 健康度評估（0.5-5.0）
-
-2. **遊戲長度變化** ⭐ 關鍵指標
-   - 每次迭代的平均步數
-   - 超短局（<15步）比例
-   - 趨勢判斷
-
-3. **價值網路指標**
-   - 價值MAE變化
-   - 改善情況
-
-4. **總結建議**
-   - 當前問題診斷
-   - 是否繼續訓練
-   - 預期效果
-
-**輸出**: 文字報告，包含建議
-
----
-
-## 🎮 遊戲可視化工具
-
-### `visualize_game.py` - 遊戲棋譜可視化
-
-**功能**: 可視化特定遊戲的棋譜
-
-**用法**:
-```bash
-python analysis/visualize_game.py
-```
-
-**交互方式**:
-1. 輸入迭代次數
-2. 輸入遊戲編號
-3. 顯示棋盤狀態和移動序列
-
-**顯示內容**:
-- ASCII 棋盤
-- 每步移動詳情
-- 勝負結果
-- MCTS 統計信息（如果有）
-
----
-
-## 🔧 使用建議
-
-### 訓練中
-
-**邊訓練邊監控**:
-```bash
-# 終端 1：啟動訓練
-python train_pipeline_pytorch.py
-
-# 終端 2：實時監控
-python analysis/monitor_training.py
-```
-
-### 訓練後
-
-**生成完整分析**:
-```bash
-# 1. 生成所有圖表（推薦）
-python analysis/plot_comprehensive.py
-
-# 2. 查看詳細文字分析
-python analysis/analyze_progress.py
-
-# 3. 查看特定遊戲
-python analysis/visualize_game.py
+python analysis/diagnose_training.py
 ```
 
 ---
 
-## 📁 輸出文件
+## 📁 目录结构
 
 ```
 analysis/
-├── plots/                      # 圖表輸出目錄
-│   ├── 1_training_metrics.png
-│   ├── 2_loss_breakdown.png
-│   ├── 3_gradient_analysis.png
-│   ├── 4_value_network_metrics.png
-│   ├── 5_game_length_distribution.png
-│   ├── 6_win_rate_trends.png
-│   ├── 7_strategy_evolution.png
-│   ├── 8_game_patterns.png
-│   ├── 9_comprehensive_dashboard.png
-│   └── 10_correlation_matrix.png
-│
-├── plot_comprehensive.py       # 圖表生成工具
-├── monitor_training.py         # 實時監控
-├── analyze_progress.py         # 進展分析
-├── visualize_game.py           # 遊戲可視化
-└── README.md                   # 本文件
+├── plot_comprehensive.py       生成图表（最常用）
+├── monitor_training.py         实时监控
+├── diagnose_training.py        健康诊断
+├── plots/                      图表输出目录
+└── README.md                   本文件
 ```
 
 ---
 
-## 💡 常見用途
+## 📊 图表说明
 
-### 檢查訓練健康度
-```bash
-python analysis/analyze_progress.py
-```
-查看梯度是否穩定，是否需要調整學習率。
+### 重点关注的3张图表
 
-### 診斷 Edge-Rush 問題
-```bash
-python analysis/plot_comprehensive.py
-```
-查看圖表 7（策略演化）和圖表 8（遊戲模式）。
+| 图表 | 文件名 | 关键指标 |
+|------|-------|---------|
+| 综合仪表板 | 9_comprehensive_dashboard.png | 总体健康度（最重要）|
+| 训练指标 | 1_training_metrics.png | 损失趋势 |
+| 价值网络 | 4_value_network_metrics.png | MAE: 0.70-0.85 ✅ |
 
-### 決定是否繼續訓練
-```bash
-python analysis/analyze_progress.py
-```
-查看「總結建議」部分的建議。
+### 问题诊断图表
 
-### 對比不同配置效果
-1. 訓練配置 A → 生成圖表 → 保存到 `plots_configA/`
-2. 訓練配置 B → 生成圖表 → 保存到 `plots_configB/`
-3. 對比兩組圖表
+| 图表 | 诊断什么 |
+|------|---------|
+| 2_loss_breakdown.png | 哪种损失异常 |
+| 3_gradient_analysis.png | 梯度消失/爆炸 |
+| 5_game_length_distribution.png | 套路化（游戏过短）|
+| 6_win_rate_trends.png | 黑白失衡 |
+| 7_strategy_evolution.png | Edge-rush问题 |
 
 ---
 
-## 🎯 快速開始
+## 🎯 推荐工作流
 
-**第一次使用**:
+### 日常使用（训练后）
+
 ```bash
-# 確保已安裝依賴
-pip install matplotlib seaborn pandas numpy
-
-# 生成所有圖表
+# 1. 生成图表
 python analysis/plot_comprehensive.py
 
-# 查看結果
-cd analysis/plots
-# 使用圖片查看器打開 PNG 文件
+# 2. 查看综合仪表板
+# Windows: start analysis/plots/9_comprehensive_dashboard.png
+# Linux: xdg-open analysis/plots/9_comprehensive_dashboard.png
+
+# 3. 完成！
 ```
 
-**定期檢查**:
+### 训练中监控（可选）
+
 ```bash
-# 每訓練 10-20 次迭代後
-python analysis/plot_comprehensive.py
-python analysis/analyze_progress.py
+# 在单独的终端运行
+python analysis/monitor_training.py
+```
+
+### 发现问题时
+
+```bash
+# 运行诊断工具
+python analysis/diagnose_training.py
+
+# 查看对应的图表定位问题
 ```
 
 ---
 
-## ❓ 常見問題
+## ⚠️ 快速问题诊断
 
-**Q: 圖表生成失敗？**
-- 確保 `checkpoints/training_history.json` 存在
-- 確保 `logs/games/games_summary.csv` 存在
-- 檢查是否有訓練數據
-
-**Q: 中文顯示亂碼？**
-- Windows: 確保系統安裝了「微軟雅黑」字體
-- Linux: 安裝中文字體包
-- macOS: 通常自帶中文字體
-
-**Q: 圖表太大/太小？**
-- 編輯 `plot_comprehensive.py`
-- 修改 `figsize=(16, 10)` 參數
-- 或修改 `dpi=300` 參數
+| 症状 | 查看图表 | 健康标准 |
+|------|---------|---------|
+| 训练不稳定 | 1_training_metrics.png | 损失持续下降 |
+| 价值崩溃 | 4_value_network_metrics.png | MAE: 0.70-0.85 |
+| 套路化 | 5_game_length_distribution.png | 游戏长度50-70步 |
+| 黑白失衡 | 6_win_rate_trends.png | 胜率45-55% |
+| 梯度问题 | 3_gradient_analysis.png | 梯度0.5-5.0 |
 
 ---
 
-## 🔗 相關文檔
+## 💡 关键提示
 
-- 訓練指南: `docs/TRAINING_GUIDE.md`
-- 獎勵機制: `docs/REWARD_MECHANISM.md`
-- 性能優化: `docs/PERFORMANCE.md`
+**90%的时间**: 只需要运行 `plot_comprehensive.py`
+
+**查看仪表板**: `plots/9_comprehensive_dashboard.png` 一目了然
+
+**其他工具**: monitor 和 diagnose 按需使用
+
+---
+
+**最后更新**: 2025-12-26
+
+**核心理念**: 简洁、直观、专注可视化

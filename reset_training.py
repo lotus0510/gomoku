@@ -51,7 +51,7 @@ def show_current_status():
         if os.path.exists('logs/games/games_summary.csv'):
             with open('logs/games/games_summary.csv', 'r') as f:
                 game_count = sum(1 for line in f) - 1  # 减去表头
-            print(f"   • {game_count} 局游戏记录")
+                print(f"   • 5{game_count} 局游戏记录")
 
         # 统计 PNG 文件
         png_count = 0

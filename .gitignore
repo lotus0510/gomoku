@@ -25,6 +25,7 @@ logs/games/*
 !logs/games/*.csv
 !logs/games/*.png
 checkpoints/
+backup/
 old_backup/
 *.h5
 *.weights.h5

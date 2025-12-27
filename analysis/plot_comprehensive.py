@@ -15,6 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -65,6 +66,60 @@ class ComprehensivePlotter:
         else:
             print("  ✗ 找不到遊戲數據")
             self.games_df = None
+
+        # 配置變更記錄
+        config_changes_path = self.checkpoint_dir / 'config_changes.json'
+        if config_changes_path.exists():
+            with open(config_changes_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                self.config_changes = data.get('changes', [])
+            print(f"  ✓ 配置變更: {len(self.config_changes)} 次")
+        else:
+            print("  ✗ 找不到配置變更記錄")
+            self.config_changes = []
+
+    def mark_config_changes(self, ax, iterations=None):
+        """在圖表上標記配置變更點
+
+        Args:
+            ax: matplotlib axes 對象
+            iterations: 迭代數列表（用於確定 y 軸範圍），如果為 None 則使用當前 ax 的範圍
+        """
+        if not self.config_changes:
+            return
+
+        # 獲取 y 軸範圍
+        if iterations is not None:
+            ymin, ymax = ax.get_ylim()
+        else:
+            ymin, ymax = ax.get_ylim()
+
+        # 標記每次配置變更
+        for change in self.config_changes:
+            iter_num = change['iteration']
+            change_type = change['change_type']
+            change_count = change['change_count']
+
+            # 根據變更類型選擇顏色
+            if change_type == 'auto_reset':
+                color = 'red'
+                label = '自動重置'
+            elif change_type == 'manual':
+                color = 'orange'
+                label = '手動調整'
+            else:  # resume
+                color = 'blue'
+                label = '恢復訓練'
+
+            # 畫垂直虛線
+            ax.axvline(x=iter_num, color=color, linestyle='--', alpha=0.5, linewidth=1.5)
+
+            # 添加註解（只顯示在圖表上方）
+            y_pos = ymax - (ymax - ymin) * 0.05  # 靠近頂部
+            ax.text(iter_num, y_pos, f'{label}\n({change_count}個參數)',
+                   rotation=90, verticalalignment='top', horizontalalignment='right',
+                   fontsize=8, color=color, alpha=0.7,
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor=color))
 
     def plot_all(self):
         """生成所有圖表"""
@@ -152,6 +207,10 @@ class ComprehensivePlotter:
                    transform=ax.transAxes, fontsize=14)
             ax.set_title('對隨機玩家勝率（無數據）')
 
+        # 在所有子圖上標記配置變更
+        for ax in axes.flat:
+            self.mark_config_changes(ax)
+
         plt.tight_layout()
         plt.savefig(self.output_dir / '1_training_metrics.png', dpi=300, bbox_inches='tight')
         plt.close()
@@ -221,6 +280,10 @@ class ComprehensivePlotter:
             ax.text(0.5, 0.5, '無標準差數據', ha='center', va='center',
                    transform=ax.transAxes, fontsize=14)
 
+        # 標記配置變更
+        for ax in axes.flat:
+            self.mark_config_changes(ax)
+
         plt.tight_layout()
         plt.savefig(self.output_dir / '2_loss_breakdown.png', dpi=300, bbox_inches='tight')
         plt.close()
@@ -235,12 +298,18 @@ class ComprehensivePlotter:
         iterations = self.history['iterations']
         grad_norms = self.history['gradient_norm']
 
+        # 過濾無效值（inf, NaN）
+        grad_norms_array = np.array(grad_norms)
+        valid_mask = np.isfinite(grad_norms_array)
+        grad_norms_valid = grad_norms_array[valid_mask]
+        iterations_valid = np.array(iterations)[valid_mask]
+
         # 1. 梯度範數時間序列
         ax = axes[0, 0]
-        ax.plot(iterations, grad_norms, 'b-', linewidth=2, marker='o', markersize=4)
+        ax.plot(iterations_valid, grad_norms_valid, 'b-', linewidth=2, marker='o', markersize=4)
         ax.axhline(y=0.5, color='r', linestyle='--', alpha=0.5, label='下限 0.5')
         ax.axhline(y=5.0, color='r', linestyle='--', alpha=0.5, label='上限 5.0')
-        ax.fill_between(iterations, 0.5, 5.0, color='green', alpha=0.1, label='健康範圍')
+        ax.fill_between(iterations_valid, 0.5, 5.0, color='green', alpha=0.1, label='健康範圍')
         ax.set_xlabel('迭代次數')
         ax.set_ylabel('梯度範數')
         ax.set_title('梯度範數趨勢')
@@ -249,11 +318,14 @@ class ComprehensivePlotter:
 
         # 2. 梯度範數分佈
         ax = axes[0, 1]
-        ax.hist(grad_norms, bins=30, color='blue', alpha=0.7, edgecolor='black')
-        ax.axvline(x=0.5, color='r', linestyle='--', linewidth=2, label='下限')
-        ax.axvline(x=5.0, color='r', linestyle='--', linewidth=2, label='上限')
-        ax.axvline(x=np.mean(grad_norms), color='g', linestyle='-', linewidth=2,
-                  label=f'平均 {np.mean(grad_norms):.2f}')
+        if len(grad_norms_valid) > 0:
+            ax.hist(grad_norms_valid, bins=30, color='blue', alpha=0.7, edgecolor='black')
+            ax.axvline(x=0.5, color='r', linestyle='--', linewidth=2, label='下限')
+            ax.axvline(x=5.0, color='r', linestyle='--', linewidth=2, label='上限')
+            ax.axvline(x=np.mean(grad_norms_valid), color='g', linestyle='-', linewidth=2,
+                      label=f'平均 {np.mean(grad_norms_valid):.2f}')
+        else:
+            ax.text(0.5, 0.5, '無有效梯度數據', ha='center', va='center', transform=ax.transAxes)
         ax.set_xlabel('梯度範數')
         ax.set_ylabel('頻率')
         ax.set_title('梯度範數分佈')
@@ -275,27 +347,34 @@ class ComprehensivePlotter:
 
         # 4. 梯度健康度評分
         ax = axes[1, 1]
-        # 計算健康度：在 0.5-5.0 範圍內的百分比
-        healthy_count = sum(1 for g in grad_norms if 0.5 <= g <= 5.0)
-        healthy_pct = healthy_count / len(grad_norms) * 100
+        # 計算健康度：在 0.5-5.0 範圍內的百分比（使用有效值）
+        if len(grad_norms_valid) > 0:
+            healthy_count = sum(1 for g in grad_norms_valid if 0.5 <= g <= 5.0)
+            healthy_pct = healthy_count / len(grad_norms_valid) * 100
 
-        categories = ['健康\n(0.5-5.0)', '過小\n(<0.5)', '過大\n(>5.0)']
-        counts = [
-            healthy_count,
-            sum(1 for g in grad_norms if g < 0.5),
-            sum(1 for g in grad_norms if g > 5.0)
-        ]
-        colors = ['green', 'orange', 'red']
+            categories = ['健康\n(0.5-5.0)', '過小\n(<0.5)', '過大\n(>5.0)']
+            counts = [
+                healthy_count,
+                sum(1 for g in grad_norms_valid if g < 0.5),
+                sum(1 for g in grad_norms_valid if g > 5.0)
+            ]
+            colors = ['green', 'orange', 'red']
 
-        ax.bar(categories, counts, color=colors, alpha=0.7, edgecolor='black')
-        ax.set_ylabel('迭代次數')
-        ax.set_title(f'梯度健康度統計（健康度: {healthy_pct:.1f}%）')
+            ax.bar(categories, counts, color=colors, alpha=0.7, edgecolor='black')
+            ax.set_ylabel('迭代次數')
+            ax.set_title(f'梯度健康度統計（健康度: {healthy_pct:.1f}%）')
 
-        # 添加數值標籤
-        for i, (cat, count) in enumerate(zip(categories, counts)):
-            ax.text(i, count, str(count), ha='center', va='bottom', fontsize=12, fontweight='bold')
+            # 添加數值標籤
+            for i, (cat, count) in enumerate(zip(categories, counts)):
+                ax.text(i, count, str(count), ha='center', va='bottom', fontsize=12, fontweight='bold')
 
-        ax.grid(True, alpha=0.3, axis='y')
+            ax.grid(True, alpha=0.3, axis='y')
+        else:
+            ax.text(0.5, 0.5, '無有效梯度數據', ha='center', va='center', transform=ax.transAxes)
+
+        # 標記配置變更
+        for ax in axes.flat:
+            self.mark_config_changes(ax)
 
         plt.tight_layout()
         plt.savefig(self.output_dir / '3_gradient_analysis.png', dpi=300, bbox_inches='tight')
@@ -326,14 +405,20 @@ class ComprehensivePlotter:
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-        # 2. 價值標準差
+        # 2. 價值標準差 + 零值比例（新增！）
         ax = axes[0, 1]
         if 'value_std' in self.history:
             value_std = self.history['value_std']
-            ax.plot(iterations, value_std, 'purple', linewidth=2, marker='s', markersize=4)
+            ax.plot(iterations, value_std, 'purple', linewidth=2, marker='s', markersize=4, label='價值標準差')
+
+            # 添加健康範圍標記
+            ax.axhspan(0.3, 1.0, alpha=0.1, color='green', label='健康範圍 (>0.3)')
+            ax.axhspan(0.0, 0.3, alpha=0.1, color='red')
+
             ax.set_xlabel('迭代次數')
             ax.set_ylabel('標準差')
-            ax.set_title('價值預測標準差（多樣性）')
+            ax.set_title('價值預測標準差（<0.3 表示失去判別力）')
+            ax.legend()
             ax.grid(True, alpha=0.3)
 
         # 3. 策略 Top-1 機率
@@ -355,6 +440,10 @@ class ComprehensivePlotter:
             ax.set_ylabel('熵值')
             ax.set_title('策略熵（越低越確定）')
             ax.grid(True, alpha=0.3)
+
+        # 標記配置變更（這是最重要的圖表之一）
+        for ax in axes.flat:
+            self.mark_config_changes(ax)
 
         plt.tight_layout()
         plt.savefig(self.output_dir / '4_value_network_metrics.png', dpi=300, bbox_inches='tight')
@@ -513,28 +602,55 @@ class ComprehensivePlotter:
         ax.set_title('黑白勝率不平衡度（|黑勝率 - 0.5|）')
         ax.grid(True, alpha=0.3)
 
-        # 4. 最近趨勢
+        # 4. 勝率振盪分析（新增！）
         ax = axes[1, 1]
-        recent_n = min(10, len(iter_stats))
-        recent_stats = iter_stats.tail(recent_n)
 
-        x = np.arange(len(recent_stats))
-        width = 0.35
+        # 計算滾動窗口的標準差和翻轉次數
+        window_size = 5
+        if len(iter_stats) >= window_size:
+            rolling_std = []
+            flip_counts = []
 
-        bars1 = ax.bar(x - width/2, recent_stats['black_rate'], width,
-                      label='黑勝率', color='black', alpha=0.7)
-        bars2 = ax.bar(x + width/2, recent_stats['white_rate'], width,
-                      label='白勝率', color='white', edgecolor='black', alpha=0.7)
+            for i in range(window_size - 1, len(iter_stats)):
+                window_rates = iter_stats['black_rate'].iloc[i-window_size+1:i+1].values
+                rolling_std.append(np.std(window_rates))
 
-        ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, label='50% 基準')
-        ax.set_xlabel('迭代')
-        ax.set_ylabel('勝率')
-        ax.set_title(f'最近 {recent_n} 次迭代勝率對比')
-        ax.set_xticks(x)
-        ax.set_xticklabels(recent_stats['iteration'].values)
-        ax.set_ylim([0, 1])
-        ax.legend()
-        ax.grid(True, alpha=0.3, axis='y')
+                # 計算翻轉次數
+                flips = 0
+                for j in range(1, len(window_rates)):
+                    if (window_rates[j-1] > 0.5) != (window_rates[j] > 0.5):
+                        flips += 1
+                flip_counts.append(flips)
+
+            rolling_iters = iter_stats['iteration'].iloc[window_size-1:].values
+
+            # 雙Y軸
+            ax2 = ax.twinx()
+
+            line1 = ax.plot(rolling_iters, rolling_std, 'r-', linewidth=2,
+                           marker='o', markersize=4, label='振盪標準差')
+            ax2_line = ax2.plot(rolling_iters, flip_counts, 'b--', linewidth=2,
+                               marker='s', markersize=4, label='翻轉次數')
+
+            # 健康範圍標記
+            ax.axhspan(0, 0.1, alpha=0.1, color='green')
+            ax.axhspan(0.2, 1.0, alpha=0.1, color='red')
+
+            ax.set_xlabel('迭代次數')
+            ax.set_ylabel('勝率標準差（5次滾動）', color='r')
+            ax2.set_ylabel('優勢翻轉次數', color='b')
+            ax.set_title(f'勝率振盪分析（窗口={window_size}）')
+            ax.tick_params(axis='y', labelcolor='r')
+            ax2.tick_params(axis='y', labelcolor='b')
+
+            # 合併圖例
+            lines = line1 + ax2_line
+            labels = [l.get_label() for l in lines]
+            ax.legend(lines, labels, loc='upper left')
+            ax.grid(True, alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, f'需要至少 {window_size} 次迭代',
+                   ha='center', va='center', transform=ax.transAxes, fontsize=12)
 
         plt.tight_layout()
         plt.savefig(self.output_dir / '6_win_rate_trends.png', dpi=300, bbox_inches='tight')
@@ -758,7 +874,7 @@ class ComprehensivePlotter:
 """
 
         ax.text(0.1, 0.9, summary_text, transform=ax.transAxes,
-               fontsize=11, verticalalignment='top', fontfamily='monospace',
+               fontsize=11, verticalalignment='top',
                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
         plt.tight_layout()
@@ -904,7 +1020,7 @@ class ComprehensivePlotter:
 """
 
         ax9.text(0.1, 0.9, metrics_text, transform=ax9.transAxes,
-                fontsize=12, verticalalignment='top', fontfamily='monospace',
+                fontsize=12, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
         plt.savefig(self.output_dir / '9_comprehensive_dashboard.png', dpi=300, bbox_inches='tight')
